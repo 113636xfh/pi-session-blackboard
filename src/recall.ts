@@ -28,6 +28,7 @@ const SECTION_RE = /^##\s+(.+?)\s*$/;
 /** Digest field → section label, so a hit from a snapshot is still attributable. */
 const DIGEST_SECTIONS: Record<string, string> = {
 	goal: "Goal",
+	findings: "Findings",
 	next: "Next",
 	recentFiles: "Files",
 	decisions: "Decisions",

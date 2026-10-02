@@ -3,8 +3,8 @@ export function emptyBoard() {
 	const mk = () => [];
 	return {
 		header: {},
-		sections: { goal: mk(), decisions: mk(), files: mk(), issues: mk(), next: mk(), prefs: mk(), archived: mk() },
-		raw: { goal: [], decisions: [], files: [], issues: [], next: [], prefs: [], archived: [] },
+		sections: { goal: mk(), decisions: mk(), findings: mk(), files: mk(), issues: mk(), next: mk(), prefs: mk(), archived: mk() },
+		raw: { goal: [], decisions: [], findings: [], files: [], issues: [], next: [], prefs: [], archived: [] },
 		extra: [],
 	};
 }

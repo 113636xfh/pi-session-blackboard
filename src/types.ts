@@ -5,6 +5,7 @@
 export const SECTIONS = [
 	"goal",
 	"decisions",
+	"findings",
 	"files",
 	"issues",
 	"next",
@@ -17,6 +18,7 @@ export type Section = (typeof SECTIONS)[number];
 export const SECTION_HEADERS: Record<Section, string> = {
 	goal: "Goal",
 	decisions: "Decisions",
+	findings: "Findings",
 	files: "Files",
 	issues: "Issues",
 	next: "Next",
@@ -45,6 +47,8 @@ export type DraftSections = Partial<Record<Section, string[]>>;
 export type PendingDraft = {
 	generatedAt: string;
 	sections: DraftSections;
+	/** experiment-like commands detected since the last checkpoint (reminder fodder) */
+	experiments?: string[];
 };
 
 /** Per-session extension state (persisted as JSON). */

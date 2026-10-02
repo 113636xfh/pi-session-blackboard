@@ -297,6 +297,31 @@ export function extractIssues(tools: ToolBlock[]): string[] {
 	return out;
 }
 
+/**
+ * Experiment-like bash commands: tests, typechecks, probes, benchmarks.
+ * Listed in the checkpoint so the agent is reminded to file their key
+ * findings under Findings (the commands themselves are noise — the results
+ * are the fact).
+ */
+const EXPERIMENT_RE =
+	/\b(npm|pnpm|yarn|bun)\s+(test|run\s+(?:test|tsc|smoke|bench))\b|\b(cargo|go|make|vitest|jest|pytest)\s+test\b|\bnode\s+[^|;&\n]*(?:test|probe|smoke|bench)[\w.-]*\b|\btsc\b(-p\s+\S+)?/i;
+
+export function extractExperiments(tools: ToolBlock[]): string[] {
+	const out: string[] = [];
+	const seen = new Set<string>();
+	for (const t of tools) {
+		if (t.name !== "bash" && t.name !== "run") continue;
+		const cmd = typeof t.args.command === "string" ? t.args.command : "";
+		if (!cmd || !EXPERIMENT_RE.test(cmd)) continue;
+		const c = cmd.replace(/\s+/g, " ").trim().slice(0, 80);
+		if (seen.has(c)) continue;
+		seen.add(c);
+		out.push(`RAN ${c}${t.isError ? " (failed)" : ""}`);
+		if (out.length >= 4) break;
+	}
+	return out;
+}
+
 // ---------------------------------------------------------------------------
 // Assistant-text mining (light, capped, agent corrects it at review time)
 // ---------------------------------------------------------------------------
@@ -320,6 +345,32 @@ export function extractDecisions(assistants: AssistantBlock[]): string[] {
 		}
 	}
 	return out.slice(0, 3);
+}
+
+/**
+ * Key findings from assistant prose: non-obvious results of exploration or
+ * experiments — measured behaviors, root causes, surprises. Markers are
+ * deliberately conservative; the agent culls at review time.
+ */
+const FINDING_RE =
+	/(实测|真相|根因|出乎意料|非显然|turns? out|it turns out|it became clear|actually|surprising\w*|unexpected\w*|root cause|measured|contrary to)/i;
+
+export function extractFindings(assistants: AssistantBlock[]): string[] {
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const b of assistants) {
+		for (const raw of b.text.split("\n")) {
+			const line = stripBullet(raw);
+			if (line.length < 15) continue;
+			if (!FINDING_RE.test(line)) continue;
+			const c = clip(line, 260);
+			const key = c.toLowerCase();
+			if (seen.has(key)) continue;
+			seen.add(key);
+			out.push(c);
+		}
+	}
+	return out.slice(0, 4);
 }
 
 const NEXT_RE = /\b(next (?:step|I|we|action|move)|TODO:|after (?:this|that),? (?:we|I)|remaining (?:work|steps))\b/i;
@@ -352,6 +403,8 @@ export function extractNext(assistants: AssistantBlock[], users: UserBlock[]): s
 export type ExtractResult = {
 	draft: DraftSections;
 	resolvedPaths: string[];
+	/** experiment-like commands run in this window (reminder fodder). */
+	experiments: string[];
 };
 
 const PER_SECTION_CAP = 8;
@@ -394,7 +447,10 @@ export function extractAll(
 	put("files", extractCommits(blocks.tools));
 	put("issues", extractIssues(blocks.tools));
 	put("decisions", extractDecisions(blocks.assistants));
+	// Findings last among content sections: a line that also names a decision,
+	// an error or a path stays there — findings catch only the residue.
+	put("findings", extractFindings(blocks.assistants));
 	put("next", extractNext(blocks.assistants, blocks.users));
 
-	return { draft, resolvedPaths: [...files.paths] };
+	return { draft, resolvedPaths: [...files.paths], experiments: extractExperiments(blocks.tools) };
 }

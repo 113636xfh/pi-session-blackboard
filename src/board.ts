@@ -121,14 +121,20 @@ const SUMMARY_HEADER_ROUTES: [RegExp, Section][] = [
 	[/issue|problem|blocker|error|bug|风险|问题|阻塞|失败|未解决|待解决/i, "issues"],
 	[/file|change|artifact|path|edit|文件|改动|修改|progress|done|completed|提交/i, "files"],
 	[/decision|choice|trade.?off|选择|决定|方案/i, "decisions"],
+	[/finding|learned|discovered|lesson|发现|结论|实测/i, "findings"],
 ];
 
+// NOTE: no \b around CJK alternatives — CJK chars are not \w in JS, so a CJK
+// word glued to other CJK text (no punctuation) never gets a word boundary.
 const SUMMARY_CONTENT_ROUTES: [RegExp, Section][] = [
-	[/\b(next step|next up|todo|下一步|接下来)\b/i, "next"],
-	[/\b(error|failed|exception|enoent|eacces|报错|失败|阻塞|卡在)\b/i, "issues"],
+	[/next step|next up|\btodo\b|下一步|接下来/i, "next"],
+	[/error|failed|exception|enoent|eacces|报错|失败|阻塞|卡在/i, "issues"],
 	[/(?:^|[\s`'"])[A-Za-z]:[\\/][^\s]+|(?:^|\s)\.{0,2}\/[\w.-]+\/[\w./-]+|\b[\w-]+\.(?:ts|tsx|js|mjs|cjs|json|md|py|cs|gdshader|cpp|h|sh)\b/, "files"],
-	[/\b(prefer|must not|do not|always|never|要求|偏好|不要|必须)\b/i, "prefs"],
-	[/\b(decide|decided|chosen|instead of|rationale|决定|选择|理由)\b/i, "decisions"],
+	[/prefer|must not|do not|always|never|要求|偏好|不要|必须/i, "prefs"],
+	[/decide|decided|chosen|instead of|rationale|决定|选择|理由/i, "decisions"],
+	// Findings last: a line that also names an error, a path, a preference or a
+	// decision stays there; findings catch only pure result/residue lines.
+	[/实测|真相|根因|出乎意料|非显然|turns? out|it turns out|it became clear|surprising\w*|unexpected\w*|root cause|measured/i, "findings"],
 ];
 
 const JUNK_LINE =
@@ -570,6 +576,7 @@ export function digest(board: Board, sessionId: string): Record<string, unknown>
 		at: new Date().toISOString(),
 		session: safeSid(sessionId),
 		goal: last(3)(board.sections.goal),
+		findings: last(3)(board.sections.findings),
 		next: last(3)(board.sections.next),
 		recentFiles: last(5)(board.sections.files),
 		openIssues,

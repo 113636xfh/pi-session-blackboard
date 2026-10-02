@@ -216,10 +216,14 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 			"IMPORTANT — what you commit here IS the compaction summary. When this session runs out of context, pi replaces everything before the retained tail with your blackboard entries (no separate summarization model runs). Your future self reads these lines, not the conversation. Write them the way you would write a checkpoint summary for another LLM that has to continue this work:",
 			`  - goal: what is being asked, including scope changes and corrections;`,
 			`  - decisions: the choice AND why it beat the alternative;`,
+			`  - findings: key findings from exploration/experiments — non-obvious behavior, measured results, root causes, with the exact command, number or error;`,
 			`  - files: exact paths, and which of them changed;`,
 			`  - issues: blockers with the real error text and exit codes; resolved ones must be moved or marked resolved;`,
 			`  - next: the concrete next step, not "continue working";`,
 			`  - prefs: durable constraints and preferences the user stated.`,
+			...(draft.experiments?.length
+				? [`Experiments detected this period: ${draft.experiments.join("; ")}. If any produced a key finding, commit one line per finding under findings (what was tested, the result, why it was non-obvious). If none were non-obvious, say nothing.`]
+				: []),
 			`Review the draft: correct inaccuracies, delete noise, then commit what is worth keeping via the \`blackboard\` tool (action="commit", entries=[{section, text, supersedes?}]). Sections: ${COMMIT_SECTIONS.join(", ")}. Each text must be ONE line, factual and specific, max ${cfg.maxEntryChars} chars — timestamps are added automatically. Preserve exact file paths, function names, error messages and numbers.`,
 			"Keep the board dense, not chronological: one line per fact, newest state wins.",
 			`When a fact CHANGED, put it on the new line and set supersedes="<unique substring of the old line>": the old line is archived in the same call, so the summary can never show both versions.`,
@@ -275,7 +279,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 		if (fresh.length > 0) {
 			const blocks = normalizeBranch(fresh);
 			const board = readBoardFile(s.cfg.boardDir, s.sessionId);
-			const { draft, resolvedPaths } = extractAll(blocks, board, st);
+			const { draft, resolvedPaths, experiments } = extractAll(blocks, board, st);
 
 			if (!st.goalExtracted) st.goalExtracted = true;
 
@@ -284,7 +288,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 				if (n > 0) writeBoard(s.cfg.boardDir, s.sessionId, board);
 			}
 
-			if (countDraftLines(draft) > 0) {
+			if (countDraftLines(draft) > 0 || experiments.length > 0) {
 				const pd: PendingDraft = st.pendingDraft ?? {
 					generatedAt: new Date().toISOString(),
 					sections: {},
@@ -297,6 +301,10 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 							(pd.sections[sec] ??= []).push(l);
 						}
 					}
+				}
+				if (experiments.length > 0) {
+					const prev = pd.experiments ?? [];
+					pd.experiments = [...prev, ...experiments.filter((e) => !prev.includes(e))].slice(-8);
 				}
 				pd.generatedAt = new Date().toISOString();
 				st.pendingDraft = pd;
@@ -563,12 +571,13 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 		name: "blackboard",
 		label: "Session Blackboard",
 		description:
-			"Maintain the session blackboard — durable, session-scoped notes (goal, decisions, files, issues, next steps, preferences) that survive compaction and restarts. Commit reviewed entries (optionally superseding stale ones), skip a pending draft, show the board, or archive entries.",
+			"Maintain the session blackboard — durable, session-scoped notes (goal, decisions, findings, files, issues, next steps, preferences) that survive compaction and restarts. Commit reviewed entries (optionally superseding stale ones), skip a pending draft, show the board, or archive entries.",
 		promptSnippet: "Commit reviewed entries to, show, skip, or archive the session blackboard",
 		promptGuidelines: [
 			'When a "[session-blackboard checkpoint]" message appears, review the draft it contains, then call blackboard with action="commit" for the entries worth keeping (corrected as needed), or action="skip" if none are.',
 			"blackboard entries ARE the compaction summary: when this session runs out of context, pi replaces everything before the retained tail with these entries (no summarization model runs). Write them as a checkpoint summary for your future self — what was asked, decisions and why, what is in progress or blocked, the concrete next step, exact paths/function names/error text.",
 			"blackboard entries are single lines only; keep them factual and specific (what was decided, which file path, which error). Timestamps are added automatically.",
+			"After exploration or experiments yield a non-obvious result (a measured behavior, a root cause, a gotcha), commit it under findings — one line with the exact command, number or error.",
 			'A fact that CHANGED goes on the new line with supersedes="<unique substring of the old line>" — the old line is archived in the same call, so the summary never carries both versions. Committing a correction WITHOUT supersedes leaves the stale line in place and makes the summary contradict itself.',
 			"After compaction or when resuming a session, call blackboard with action=\"show\" (or read the board file) to restore durable context, and use blackboard_recall to search older entries by keyword.",
 		],

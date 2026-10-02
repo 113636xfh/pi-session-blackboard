@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { renderSummary, SUMMARY_MIN_ENTRIES } from "../build/summary.js";
 import { formatRecall, searchDigest, searchDocument } from "../build/recall.js";
 import { renderAssistSection } from "../build/compact-assist.js";
-import { commitEntries, parseSummarySections, readBoardFile, seedFromPriorSummary } from "../build/board.js";
+import { commitEntries, parseSummarySections, readBoardFile, renderBoard, seedFromPriorSummary } from "../build/board.js";
 import { mkdtempSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -366,6 +366,69 @@ check("adopted entries are not cut at the agent cap", () => {
 	seedFromPriorSummary(dir, sid, CFG, long);
 	const md = readFileSync(join(dir, `${sid}.md`), "utf8");
 	assert.ok(md.includes("x".repeat(450)), "a 450-char rationale must survive adoption");
+});
+
+// ── findings: first-class key findings from exploration/experiments ──────
+const { extractFindings, extractExperiments } = await import("../build/extract.js");
+const assistant = (text) => [{ entryId: "a1", text }];
+const tool = (args, output = "", isError = false) => [{ entryId: "t1", callId: "c1", name: "bash", args, output, isError }];
+
+check("extractFindings catches measured/root-cause lines, skips plain prose", () => {
+	const found = extractFindings(assistant(
+		"实测 compact 0.0s vs 原生 >3min，同一台本地 27B。" + String.fromCharCode(10) +
+		"接下来继续写测试。" + String.fromCharCode(10) +
+		"Root cause: the probe killed the process before the summarizer finished.",
+	));
+	assert.equal(found.length, 2, `expected 2 findings, got ${JSON.stringify(found)}`);
+	assert.ok(found[0].includes("实测"));
+	assert.ok(found[1].includes("Root cause"));
+});
+
+check("extractExperiments flags tests/typechecks/probes, not plain commands", () => {
+	const exp = extractExperiments(tool({ command: "cd /tmp && npm test && tsc -p tsconfig.json" }));
+	assert.equal(exp.length, 1);
+	assert.ok(exp[0].startsWith("RAN "));
+	assert.equal(extractExperiments(tool({ command: "ls -la /tmp" })).length, 0);
+	const failed = extractExperiments(tool({ command: "npm test" }, "exit code 1", true));
+	assert.ok(failed[0].includes("(failed)"), "a failing experiment is marked");
+});
+
+check("a summary's Findings header routes to the findings section", () => {
+	const parsed = parseSummarySections("## Key Findings" + String.fromCharCode(10) + "- 实测：WSL bash 的目录视图会 stale");
+	assert.equal(parsed[0].section, "findings");
+});
+
+check("a measured-result line under a neutral header lands in findings", () => {
+	const parsed = parseSummarySections("## Progress" + String.fromCharCode(10) + "- 实测 compact 0.0s，比原生摘要快两个数量级");
+	assert.equal(parsed[0].section, "findings");
+});
+
+check("decision language wins over finding language (route priority)", () => {
+	const parsed = parseSummarySections("## Progress" + String.fromCharCode(10) + "- 实测更快，所以决定选择黑板方案");
+	assert.equal(parsed[0].section, "decisions", "a line naming the choice stays in Decisions");
+});
+
+check("a findings entry renders in the board and the summary", () => {
+	const b = emptyBoard();
+	b.sections.findings.push(entry("2026-10-02 22:00", "实测 compact 0.0s vs 原生 >3min"));
+	b.sections.goal.push(entry("t", "goal line"));
+	b.sections.files.push(entry("t", "modified src/summary.ts"));
+	const md = renderBoard(b);
+	assert.ok(md.includes("## Findings"), "board file has a Findings section");
+	const out = renderSummary(b);
+	assert.ok(out && out.includes("## Key Findings") && out.includes("实测 compact"), "summary carries the finding");
+});
+
+check("seedFromPriorSummary routes a Findings header into the findings section", () => {
+	const dir = tmpBoard();
+	const sid = "seed-findings";
+	const res = seedFromPriorSummary(dir, sid, CFG,
+		"## Goal" + String.fromCharCode(10) + "- make compaction lossless" + String.fromCharCode(10) +
+		"## Findings" + String.fromCharCode(10) + "- 实测：探针 40s 杀进程导致摘要没跑完");
+	assert.ok(res.seeded);
+	assert.ok(res.counts.findings === 1, `findings count missing: ${JSON.stringify(res.counts)}`);
+	const md = readFileSync(join(dir, `${sid}.md`), "utf8");
+	assert.ok(md.includes("探针 40s"));
 });
 
 // ── report ─────────────────────────────────────────────────────────────────
