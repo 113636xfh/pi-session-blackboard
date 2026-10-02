@@ -10,6 +10,10 @@ import assert from "node:assert/strict";
 import { renderSummary, SUMMARY_MIN_ENTRIES } from "../build/summary.js";
 import { formatRecall, searchDocument } from "../build/recall.js";
 import { renderAssistSection } from "../build/compact-assist.js";
+import { commitEntries, readBoardFile } from "../build/board.js";
+import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { emptyBoard } from "./helpers.mjs";
 
 let checks = 0;
@@ -123,6 +127,89 @@ const { loadConfig: loadCfg } = await import("../build/config.js");
 check("an absolute boardDir is not joined onto the agent dir (Windows path)", () => {
 	const cfg = loadCfg("/tmp/proj");
 	assert.ok(!/agent[\/]C:/.test(cfg.boardDir), `doubled path: ${cfg.boardDir}`);
+});
+
+
+// ── commit with supersedes (stale facts must not survive next to new ones) ──
+const CFG = { maxEntriesPerSection: 50, maxEntryChars: 300 };
+const tmpBoard = () => mkdtempSync(join(tmpdir(), "sbb-smoke-"));
+
+check("supersedes archives the stale line and lands the new one", () => {
+	const dir = tmpBoard();
+	const sid = "supersede-1";
+	commitEntries(dir, sid, CFG, [
+		{ section: "next", text: "board starts empty, need 3 entries before compaction" },
+	]);
+	const r = commitEntries(dir, sid, CFG, [
+		{ section: "next", text: "board has 22 entries, next compaction uses it", supersedes: "need 3 entries" },
+	]);
+	assert.equal(r.committed, 1, "the new line must be committed");
+	assert.equal(r.supersededFiles.length, 1, "exactly one archive file written");
+	assert.equal(r.supersedeMisses.length, 0, "no misses");
+	const md = readFileSync(join(dir, `${sid}.md`), "utf8");
+	assert.ok(!md.includes("need 3 entries"), "stale line must be gone from the board");
+	assert.ok(md.includes("board has 22 entries"), "new line must be on the board");
+	assert.ok(md.includes("superseded by a newer line"), "archived pointer line expected");
+	const archived = readFileSync(join(dir, ...norm(r.supersededFiles[0]).split("/")), "utf8");
+	assert.ok(archived.includes("need 3 entries"), "stale line must still be in the archive (recallable)");
+	assert.ok(existsSync(join(dir, "archive", sid)), "archive dir created");
+});
+
+check("a summary after a supersede carries only the new version", () => {
+	const dir = tmpBoard();
+	const sid = "supersede-2";
+	commitEntries(dir, sid, CFG, [
+		{ section: "decisions", text: "plan: ship the summary as board text" },
+		{ section: "files", text: "modified src/summary.ts" },
+		{ section: "goal", text: "make compaction lossless" },
+	]);
+	commitEntries(dir, sid, CFG, [
+		{ section: "decisions", text: "plan changed: board renders into native section names", supersedes: "ship the summary as board" },
+	]);
+	const out = renderSummary(readBoardFile(dir, sid), { recallTool: "blackboard_recall" });
+	assert.ok(out, "board is dense enough to render");
+	assert.ok(!out.includes("ship the summary as board text"), "summary must not contain the superseded version");
+	assert.ok(out.includes("native section names"), "summary must contain the replacement");
+});
+
+check("an ambiguous or missing supersedes target is reported, new line still lands", () => {
+	const dir = tmpBoard();
+	const sid = "supersede-3";
+	commitEntries(dir, sid, CFG, [
+		{ section: "issues", text: "build fails on windows path" },
+		{ section: "issues", text: "build fails on linux path too" },
+	]);
+	const amb = commitEntries(dir, sid, CFG, [
+		{ section: "issues", text: "build failure fixed", supersedes: "build fails on" },
+	]);
+	assert.equal(amb.committed, 1, "the new fact is still committed");
+	assert.equal(amb.supersededFiles.length, 0, "nothing archived when the match is ambiguous");
+	assert.equal(amb.supersedeMisses.length, 1);
+	assert.match(amb.supersedeMisses[0].reason, /matches 2 entries/);
+
+	const miss = commitEntries(dir, sid, CFG, [
+		{ section: "goal", text: "a fresh goal", supersedes: "this text is nowhere on the board" },
+	]);
+	assert.equal(miss.committed, 1);
+	assert.match(miss.supersedeMisses[0].reason, /no board entry contains/);
+});
+
+check("one commit batch can supersede several stale lines at once", () => {
+	const dir = tmpBoard();
+	const sid = "supersede-4";
+	commitEntries(dir, sid, CFG, [
+		{ section: "decisions", text: "use model A for the summary" },
+		{ section: "decisions", text: "use cache B for the prefix" },
+	]);
+	const r = commitEntries(dir, sid, CFG, [
+		{ section: "decisions", text: "use the board itself as the summary", supersedes: "model A" },
+		{ section: "decisions", text: "use a byte-stable prefix", supersedes: "cache B" },
+	]);
+	assert.equal(r.committed, 2);
+	assert.equal(r.supersededFiles.length, 2, "each supersede writes its own archive file");
+	assert.equal(r.supersedeMisses.length, 0);
+	const md = readFileSync(join(dir, `${sid}.md`), "utf8");
+	assert.ok(!md.includes("model A") && !md.includes("cache B"), "both stale lines gone");
 });
 
 // ── report ─────────────────────────────────────────────────────────────────

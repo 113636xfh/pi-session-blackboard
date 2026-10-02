@@ -142,8 +142,9 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 			`  - issues: blockers with the real error text and exit codes; resolved ones must be moved or marked resolved;`,
 			`  - next: the concrete next step, not "continue working";`,
 			`  - prefs: durable constraints and preferences the user stated.`,
-			`Review the draft: correct inaccuracies, delete noise, then commit what is worth keeping via the \`blackboard\` tool (action="commit", entries=[{section, text}]). Sections: ${COMMIT_SECTIONS.join(", ")}. Each text must be ONE line, factual and specific, max ${cfg.maxEntryChars} chars — timestamps are added automatically. Preserve exact file paths, function names, error messages and numbers.`,
-			"Keep the board dense, not chronological: one line per fact, newest state wins, superseded lines removed or archived.",
+			`Review the draft: correct inaccuracies, delete noise, then commit what is worth keeping via the \`blackboard\` tool (action="commit", entries=[{section, text, supersedes?}]). Sections: ${COMMIT_SECTIONS.join(", ")}. Each text must be ONE line, factual and specific, max ${cfg.maxEntryChars} chars — timestamps are added automatically. Preserve exact file paths, function names, error messages and numbers.`,
+			"Keep the board dense, not chronological: one line per fact, newest state wins.",
+			`When a fact CHANGED, put it on the new line and set supersedes="<unique substring of the old line>": the old line is archived in the same call, so the summary can never show both versions.`,
 			"If nothing is worth keeping, call the tool with action=\"skip\".",
 			"--- draft ---",
 		];
@@ -435,12 +436,13 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 		name: "blackboard",
 		label: "Session Blackboard",
 		description:
-			"Maintain the session blackboard — durable, session-scoped notes (goal, decisions, files, issues, next steps, preferences) that survive compaction and restarts. Commit reviewed entries, skip a pending draft, show the board, or archive entries.",
+			"Maintain the session blackboard — durable, session-scoped notes (goal, decisions, files, issues, next steps, preferences) that survive compaction and restarts. Commit reviewed entries (optionally superseding stale ones), skip a pending draft, show the board, or archive entries.",
 		promptSnippet: "Commit reviewed entries to, show, skip, or archive the session blackboard",
 		promptGuidelines: [
 			'When a "[session-blackboard checkpoint]" message appears, review the draft it contains, then call blackboard with action="commit" for the entries worth keeping (corrected as needed), or action="skip" if none are.',
 			"blackboard entries ARE the compaction summary: when this session runs out of context, pi replaces everything before the retained tail with these entries (no summarization model runs). Write them as a checkpoint summary for your future self — what was asked, decisions and why, what is in progress or blocked, the concrete next step, exact paths/function names/error text.",
 			"blackboard entries are single lines only; keep them factual and specific (what was decided, which file path, which error). Timestamps are added automatically.",
+			'A fact that CHANGED goes on the new line with supersedes="<unique substring of the old line>" — the old line is archived in the same call, so the summary never carries both versions. Committing a correction WITHOUT supersedes leaves the stale line in place and makes the summary contradict itself.',
 			"After compaction or when resuming a session, call blackboard with action=\"show\" (or read the board file) to restore durable context, and use blackboard_recall to search older entries by keyword.",
 		],
 		parameters: Type.Object({
@@ -455,6 +457,12 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 							description: `target section: ${COMMIT_SECTIONS.join(" | ")}`,
 						}),
 						text: Type.String({ description: "one line, factual and specific" }),
+						supersedes: Type.Optional(
+							Type.String({
+								description:
+									"unique substring of an existing entry this line REPLACES; the old line is archived in the same call. Use it whenever a fact changed.",
+							}),
+						),
 					}),
 					{ description: "entries to commit (action=commit)" },
 				),
@@ -476,10 +484,19 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 				switch (params.action) {
 					case "commit": {
 						const raw: unknown[] = Array.isArray(params.entries) ? (params.entries as unknown[]) : [];
-						const entries = raw.filter(
-							(e): e is { section: Section; text: string } =>
-								!!e && typeof e === "object" && typeof (e as { text?: unknown }).text === "string" && COMMIT_SECTIONS.includes((e as { section?: unknown }).section as Section),
-						);
+						const entries = raw
+							.filter(
+								(e): e is { section: Section; text: string; supersedes?: unknown } =>
+									!!e &&
+									typeof e === "object" &&
+									typeof (e as { text?: unknown }).text === "string" &&
+									COMMIT_SECTIONS.includes((e as { section?: unknown }).section as Section),
+							)
+							.map((e) =>
+								typeof e.supersedes === "string" && e.supersedes.trim()
+									? { section: e.section, text: e.text, supersedes: e.supersedes }
+									: { section: e.section, text: e.text },
+							);
 						if (entries.length === 0) {
 							return text(
 								"No valid entries provided. Call with entries=[{section, text}] (section: " +
@@ -487,7 +504,12 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 									"), or action=\"skip\" to discard the pending draft.",
 							);
 						}
-						const { board, archivedFiles, committed, deduped } = commitEntries(dir, s.sessionId, s.cfg, entries);
+						const { board, archivedFiles, committed, deduped, supersededFiles, supersedeMisses } = commitEntries(
+							dir,
+							s.sessionId,
+							s.cfg,
+							entries,
+						);
 						const st = loadState(dir, s.sessionId);
 						clearPending(st);
 						st.checkpointCount += 1;
@@ -495,8 +517,27 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 						st.boardVersion += 1;
 						saveState(dir, s.sessionId, st);
 						mirror(s, board);
-						debug(s, { event: "commit", committed, deduped, archived: archivedFiles.length });
+						debug(s, {
+							event: "commit",
+							committed,
+							deduped,
+							archived: archivedFiles.length,
+							superseded: supersededFiles.length,
+							supersedeMisses: supersedeMisses.length,
+						});
 						const parts: string[] = [`Committed ${committed} entries${deduped ? ` (${deduped} duplicates skipped)` : ""}. Blackboard v${st.boardVersion}.`];
+						if (supersededFiles.length > 0) {
+							parts.push(
+								`Superseded ${supersededFiles.length} stale entries → archived to ${supersededFiles.join(", ")} (still searchable via blackboard_recall).`,
+							);
+						}
+						if (supersedeMisses.length > 0) {
+							parts.push(
+								`⚠ ${supersedeMisses.length} supersedes target(s) archived nothing — the stale line is probably still on the board: ${supersedeMisses
+									.map((m) => `"${m.target}" (${m.reason})`)
+									.join("; ")}. Retry with a longer unique substring, or use action="archive".`,
+							);
+						}
 						if (archivedFiles.length > 0) parts.push(`Rotated overflow to: ${archivedFiles.join(", ")}`);
 						parts.push(renderBoard(board).slice(0, 4000));
 						return text(parts.join("\n\n"));

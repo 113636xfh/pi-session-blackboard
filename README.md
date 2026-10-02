@@ -107,13 +107,30 @@ Remove with `pi remove npm:pi-session-blackboard` (or the installed name shown b
 
 | action | what it does |
 |---|---|
-| `commit` | records `entries=[{section, text}]` (one line each, auto-timestamped, deduped, capped at 300 chars). Section overflow rotates into the archive file. |
+| `commit` | records `entries=[{section, text, supersedes?}]` (one line each, auto-timestamped, deduped, capped at 300 chars). Section overflow rotates into the archive file. |
+| `commit` + `supersedes` | on one entry: a unique substring of the board entry **it replaces**. The stale line is archived in the same call, so the summary can never carry both versions of a changed fact. Ambiguous or missing targets are reported back (the new line still lands) — retry with a longer substring, or use `archive`. |
 | `skip` | discards the pending draft. |
 | `show` | prints the current board (truncated in the tool result; full file on disk). |
 | `archive` | moves a single stale entry (unique `target` substring) into the archive file, with a pointer left in `## Archived`. |
 
 Sections: `goal | decisions | files | issues | next | prefs`
 (`archived` is managed by the extension, not writable by the agent).
+
+**Facts change; the board must not keep both versions.** `commit` only dedupes on
+an exact match, so correcting a line without `supersedes` would leave the stale
+one next to it. Example:
+
+```jsonc
+{ "action": "commit", "entries": [
+  { "section": "next", "text": "board has 22 entries, next compaction uses it",
+    "supersedes": "starts empty, need 3 entries" }
+]}
+```
+
+→ the old line moves to `archive/<sessionId>/board-<ts>.md` (still greppable via
+`blackboard_recall`), a pointer lands in `## Archived`, and the new line is the
+only version the compaction summary can show. Several entries in one batch may
+each supersede a different line.
 
 ## `/bb` command
 

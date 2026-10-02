@@ -151,12 +151,48 @@ function writeArchiveFile(
 	return `archive/${safeSid(sessionId)}/${name}`;
 }
 
+export type CommitInput = {
+	section: Section;
+	text: string;
+	/**
+	 * Unique substring of an existing board entry that this line REPLACES.
+	 * The old line is moved to the archive file in the same call, so a changed
+	 * fact can never end up in the summary next to the version it replaced.
+	 */
+	supersedes?: string;
+};
+
 export type CommitResult = {
 	board: Board;
 	archivedFiles: string[];
 	committed: number;
 	deduped: number;
+	/** Archive files written because an entry was explicitly superseded. */
+	supersededFiles: string[];
+	/** supersedes targets that matched nothing, or matched more than one entry. */
+	supersedeMisses: { target: string; reason: string }[];
 };
+
+/** Single case-insensitive substring hit across every non-archived section. */
+function locateEntry(
+	board: Board,
+	target: string,
+): { count: number; hit: { section: Section; idx: number; entry: BoardEntry } | null } {
+	const t = target.trim().toLowerCase();
+	let count = 0;
+	let hit: { section: Section; idx: number; entry: BoardEntry } | null = null;
+	if (!t) return { count: 0, hit: null };
+	for (const s of SECTIONS) {
+		if (s === "archived") continue;
+		board.sections[s].forEach((entry, idx) => {
+			if (entry.text.toLowerCase().includes(t)) {
+				count++;
+				hit = { section: s, idx, entry };
+			}
+		});
+	}
+	return { count, hit };
+}
 
 /**
  * Commit reviewed entries into the board. Deterministic, no LLM:
@@ -168,17 +204,41 @@ export function commitEntries(
 	boardDir: string,
 	sessionId: string,
 	cfg: { maxEntriesPerSection: number; maxEntryChars: number },
-	entries: { section: Section; text: string }[],
+	entries: CommitInput[],
 ): CommitResult {
 	const board = readBoardFile(boardDir, sessionId);
 	const ts = nowLocal();
 	const archivedFiles: string[] = [];
+	const supersededFiles: string[] = [];
+	const supersedeMisses: { target: string; reason: string }[] = [];
 	let committed = 0;
 	let deduped = 0;
 
 	for (const e of entries) {
 		const text = cleanEntryText(e.text, cfg.maxEntryChars);
 		if (!text) continue;
+
+		// Supersede FIRST, so the line being replaced is out of the board before the
+		// replacement lands (and before the dedupe check below can compare against it).
+		if (typeof e.supersedes === "string" && e.supersedes.trim()) {
+			const target = e.supersedes;
+			const { count, hit } = locateEntry(board, target);
+			if (count === 1 && hit) {
+				const m = hit as { section: Section; idx: number; entry: BoardEntry };
+				const [removed] = board.sections[m.section].splice(m.idx, 1);
+				const rel = writeArchiveFile(boardDir, sessionId, m.section, [removed]);
+				supersededFiles.push(rel);
+				board.sections.archived.push({
+					ts,
+					text: `(archived) 1 ${SECTION_HEADERS[m.section]} entry superseded by a newer line → ${rel}`,
+				});
+			} else if (count === 0) {
+				supersedeMisses.push({ target, reason: "no board entry contains this substring" });
+			} else {
+				supersedeMisses.push({ target, reason: `matches ${count} entries — use a longer, unique substring` });
+			}
+		}
+
 		const key = text.toLowerCase();
 		const arr = board.sections[e.section];
 		if (arr.some((x) => x.text.toLowerCase() === key)) {
@@ -215,7 +275,7 @@ export function commitEntries(
 
 	board.header.updated = ts;
 	writeBoard(boardDir, sessionId, board);
-	return { board, archivedFiles, committed, deduped };
+	return { board, archivedFiles, committed, deduped, supersededFiles, supersedeMisses };
 }
 
 /**
