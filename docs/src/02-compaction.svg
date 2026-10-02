@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" font-family="'Noto Sans CJK SC','Noto Sans',sans-serif">
+  <rect x="0" y="0" width="1280" height="720" fill="#ffffff"/>
+
+  <text x="640" y="52" font-size="26" font-weight="bold" fill="#1a202c" text-anchor="middle">压缩接管：黑板即摘要</text>
+  <text x="640" y="86" font-size="15" fill="#5a6a80" text-anchor="middle">板厚时压缩是纯文件操作；板薄时回退原生流程，其摘要再被收编回板</text>
+
+  <!-- trigger chip (gray) -->
+  <rect x="270" y="116" width="300" height="44" rx="10" fill="#f7f9fb" stroke="#94a3b8" stroke-width="2"/>
+  <text x="420" y="145" font-size="20" font-weight="bold" fill="#2d3748" text-anchor="middle">pi 判定要压缩</text>
+
+  <line x1="420" y1="160" x2="420" y2="166" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="412,166 428,166 420,180" fill="#718096"/>
+
+  <!-- gate: is the board dense enough (green) -->
+  <rect x="270" y="180" width="300" height="68" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
+  <text x="420" y="208" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">黑板够厚？</text>
+  <text x="420" y="230" font-size="15" fill="#5a6a80" text-anchor="middle">≥ 3 条真实条目</text>
+
+  <!-- yes: board renders the summary (green) -->
+  <line x1="420" y1="248" x2="420" y2="286" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="412,286 428,286 420,300" fill="#718096"/>
+  <text x="434" y="278" font-size="15" fill="#5a6a80">是</text>
+
+  <rect x="270" y="300" width="300" height="68" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
+  <text x="420" y="328" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">黑板渲染为摘要</text>
+  <text x="420" y="350" font-size="15" fill="#5a6a80" text-anchor="middle">跳过摘要模型调用</text>
+
+  <line x1="420" y1="368" x2="420" y2="390" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="412,390 428,390 420,404" fill="#718096"/>
+
+  <!-- result (gray) -->
+  <rect x="270" y="404" width="300" height="68" rx="10" fill="#f7f9fb" stroke="#94a3b8" stroke-width="2"/>
+  <text x="420" y="432" font-size="20" font-weight="bold" fill="#2d3748" text-anchor="middle">压缩完成</text>
+  <text x="420" y="454" font-size="15" fill="#5a6a80" text-anchor="middle">0 模型调用 · 实测 0.0s</text>
+
+  <!-- no: native fallback (orange = the only LLM call) -->
+  <line x1="570" y1="214" x2="710" y2="214" stroke="#d64545" stroke-width="2.5"/>
+  <text x="582" y="206" font-size="15" fill="#d64545">否</text>
+  <line x1="710" y1="214" x2="710" y2="490" stroke="#d64545" stroke-width="2.5"/>
+  <line x1="710" y1="490" x2="856" y2="490" stroke="#d64545" stroke-width="2.5"/>
+  <polygon points="856,482 856,498 870,490" fill="#d64545"/>
+
+  <rect x="870" y="446" width="290" height="88" rx="10" fill="#fdeacc" stroke="#e8850c" stroke-width="2"/>
+  <text x="1015" y="474" font-size="20" font-weight="bold" fill="#9a4d00" text-anchor="middle">原生流程照跑</text>
+  <text x="1015" y="496" font-size="15" fill="#5a6a80" text-anchor="middle">摘要模型调用（唯一 LLM）</text>
+  <text x="1015" y="518" font-size="15" fill="#5a6a80" text-anchor="middle">板子太薄时的兜底</text>
+
+  <!-- adopt the native summary back into the board (green) -->
+  <line x1="1015" y1="534" x2="1015" y2="556" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="1007,556 1023,556 1015,570" fill="#718096"/>
+
+  <rect x="870" y="570" width="290" height="68" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
+  <text x="1015" y="598" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">摘要收编回板</text>
+  <text x="1015" y="620" font-size="15" fill="#5a6a80" text-anchor="middle">分节落板 · 下次走黑板</text>
+
+  <text x="640" y="690" font-size="15" fill="#5a6a80" text-anchor="middle">板厚 → 压缩零模型调用；板薄 → 原生摘要被收编，下一次压缩又走黑板</text>
+</svg>
