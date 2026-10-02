@@ -2,7 +2,7 @@
 
 > **⚠️ 实验性项目，目前工作尚不稳定。** 核心路径（板→摘要、确定性抽取、归档轮转）有测试覆盖，
 > 但 checkpoint 投递、收编解析等依赖真实会话行为，尚未经过长时间多会话验证。
-> 发现问题请到 [issues](https://github.com/LittleSatellite233/pi-session-blackboard/issues) 反馈。
+> 发现问题请到 [issues](https://github.com/113636xfh/pi-session-blackboard/issues) 反馈。
 
 **一句话**：把 pi 的压缩摘要从「模型调用」变成「文件渲染」——会话里持续维护的黑板
 （`~/.pi/agent/blackboard/<sessionId>.md`）就是压缩时保留的那份事实；压缩不再丢事实，

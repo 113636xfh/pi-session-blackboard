@@ -4,7 +4,7 @@
 > (board→summary, deterministic extraction, archive rotation) are test-covered,
 > but checkpoint delivery and adoption parsing depend on real session behaviour
 > and have not been exercised over long, multi-session runs. Please file an
-> [issue](https://github.com/LittleSatellite233/pi-session-blackboard/issues) if
+> [issue](https://github.com/113636xfh/pi-session-blackboard/issues) if
 > you find a problem.
 
 **In one line**: pi's compaction summary becomes a **file render** instead of a
