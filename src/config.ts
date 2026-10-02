@@ -46,6 +46,15 @@ export type SbbConfig = {
 	summaryMaxChars: number;
 	/** max chars per committed entry line. */
 	maxEntryChars: number;
+	/**
+	 * Adopt a pre-existing (native) compaction summary into a FRESH board.
+	 *
+	 * Turning this extension on mid-session means the history that pi already
+	 * summarised would otherwise drop out of the picture the moment the board
+	 * becomes the summary. Only ever seeds an empty board — never merges into
+	 * entries the agent curated.
+	 */
+	seedFromPriorSummary: boolean;
 	/** max draft lines rendered into a checkpoint message. */
 	maxDraftLines: number;
 	debugLog: boolean;
@@ -67,6 +76,7 @@ export const DEFAULTS: SbbConfig = {
 	summaryMaxChars: 6000,
 	maxEntryChars: 300,
 	maxDraftLines: 60,
+	seedFromPriorSummary: true,
 	debugLog: false,
 };
 
@@ -112,6 +122,7 @@ export function loadConfig(cwd: string): SbbConfig {
 	cfg.maxBoardLines = Math.max(50, Math.floor(pickNum(all, "maxBoardLines", cfg.maxBoardLines)));
 	cfg.maxEntryChars = Math.max(100, Math.floor(pickNum(all, "maxEntryChars", cfg.maxEntryChars)));
 	cfg.maxDraftLines = Math.max(10, Math.floor(pickNum(all, "maxDraftLines", cfg.maxDraftLines)));
+	cfg.seedFromPriorSummary = pickBool(all, "seedFromPriorSummary", cfg.seedFromPriorSummary);
 	cfg.mirrorToSession = pickBool(all, "mirrorToSession", cfg.mirrorToSession);
 	cfg.compaction = (["off", "digest", "board"] as const).includes(pickStr(all, "compaction", cfg.compaction) as "off" | "digest" | "board")
 		? (pickStr(all, "compaction", cfg.compaction) as "off" | "digest" | "board")

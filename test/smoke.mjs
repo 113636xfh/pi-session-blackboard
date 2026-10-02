@@ -10,8 +10,8 @@ import assert from "node:assert/strict";
 import { renderSummary, SUMMARY_MIN_ENTRIES } from "../build/summary.js";
 import { formatRecall, searchDigest, searchDocument } from "../build/recall.js";
 import { renderAssistSection } from "../build/compact-assist.js";
-import { commitEntries, readBoardFile } from "../build/board.js";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { commitEntries, parseSummarySections, readBoardFile, seedFromPriorSummary } from "../build/board.js";
+import { mkdtempSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { emptyBoard } from "./helpers.mjs";
@@ -249,6 +249,123 @@ check("digest search ignores counts/numbers but finds the session id", () => {
 	assert.equal(byId.length, 1);
 	assert.equal(byId[0].section, "session");
 	assert.ok(searchDigest(DIGEST, "2026-10-02", 5, "s").length === 0, "the `at` stamp alone is not a hit");
+});
+
+
+// ── adopting a pre-existing native compaction summary ──────────────────────
+const NATIVE_SUMMARY = `## Goal
+- 改进 pi 的上下文压缩质量，但用户认为信息损失过大，改走 blackboard 路线
+- [Scope change]
+- 压缩时继续使用原生流程，而不是按 80% 阈值流式丢消息
+
+## Constraints & Preferences
+- 用户不接受达到固定百分比后直接流式丢弃消息
+- [Scope change]
+
+## Key Decisions
+- 黑板即摘要：pi 保留切点与尾部，摘要内容换成黑板渲染结果
+
+## Files & Changes
+- Modified: D:/01-R&D/Project-pi-vcc-plus/src/engine.ts, src/prompt.ts
+- Main.cs: 相机出生改为采样实际地表高度
+
+## Open Issues
+- 阻塞：sqlite3 编译失败，exit code 1，stderr 'Error: spawnSync /usr/bin/gcc ENOENT'
+
+## Next Steps
+- 下一步：装好依赖后给 blackboard_recall 建 FTS5 索引
+`;
+
+check("a native summary is parsed into routed, single-line entries", () => {
+	const parsed = parseSummarySections(NATIVE_SUMMARY);
+	const at = (sec, re) => parsed.filter((p) => p.section === sec && re.test(p.text));
+	assert.ok(at("goal", /blackboard 路线/).length === 1, "goal bullet routed to Goal");
+	assert.ok(at("goal", /80% 阈值/).length === 1, "a Scope change is a goal, not a decision");
+	assert.ok(at("prefs", /流式丢弃消息/).length === 1, "constraints routed to Prefs");
+	assert.ok(at("prefs", /^\[Scope change\]$/).length === 0, "placeholder headers are not entries");
+	assert.ok(at("decisions", /黑板即摘要/).length === 1, "Key Decisions routed to Decisions");
+	assert.ok(at("files", /engine\.ts/).length === 1, "Files routed to Files");
+	assert.ok(at("files", /Main\.cs/).length === 1, "a path in another section is still content");
+	assert.ok(at("issues", /ENOENT/).length === 1, "Open Issues routed to Issues");
+	assert.ok(at("next", /FTS5/).length === 1, "Next Steps routed to Next");
+	assert.ok(parsed.every((p) => !p.text.includes(String.fromCharCode(10))), "entries stay one line each");
+});
+
+check("content beats the header: an error line under Progress becomes an Issue", () => {
+	const parsed = parseSummarySections("## Progress" + String.fromCharCode(10) + "- 修好了相机，但 MCP 截图报 ENOENT 仍然存在");
+	assert.equal(parsed[0].section, "issues");
+});
+
+check("seeding fills an empty board, and refuses a board that already has content", () => {
+	const dir = tmpBoard();
+	const sid = "seed-1";
+	const first = seedFromPriorSummary(dir, sid, CFG, NATIVE_SUMMARY);
+	assert.ok(first.seeded, "an empty board must accept the summary");
+	assert.ok(first.total >= 8, `expected the bullets to land, got ${first.total}`);
+	assert.ok(first.counts.goal >= 2 && first.counts.issues >= 1, `bad routing: ${JSON.stringify(first.counts)}`);
+
+	const again = seedFromPriorSummary(dir, sid, CFG, NATIVE_SUMMARY);
+	assert.equal(again.seeded, false);
+	assert.equal(again.reason, "board-not-thin", "curated content must never be re-diluted");
+
+	const curated = tmpBoard();
+	commitEntries(curated, "seed-2", CFG, [
+		{ section: "goal", text: "a" },
+		{ section: "goal", text: "b" },
+		{ section: "goal", text: "c" },
+	]);
+	const blocked = seedFromPriorSummary(curated, "seed-2", CFG, NATIVE_SUMMARY);
+	assert.equal(blocked.seeded, false);
+	assert.equal(blocked.reason, "board-not-thin");
+});
+
+check("our own board summary is never adopted back in", () => {
+	const dir = tmpBoard();
+	const sid = "seed-3";
+	const ours = ["# Session context checkpoint", "", "## Goal", "- something we wrote ourselves"].join(String.fromCharCode(10));
+	const res = seedFromPriorSummary(dir, sid, CFG, ours);
+	assert.equal(res.seeded, false);
+	assert.equal(res.reason, "own-summary");
+	assert.equal(seedFromPriorSummary(dir, sid, CFG, "   ").reason, "empty-summary");
+});
+
+check("a seeded board can immediately render as a summary", () => {
+	const dir = tmpBoard();
+	const sid = "seed-4";
+	seedFromPriorSummary(dir, sid, CFG, NATIVE_SUMMARY);
+	const out = renderSummary(readBoardFile(dir, sid), { recallTool: "blackboard_recall" });
+	assert.ok(out, "a seeded board must clear the thin-board floor");
+	assert.ok(out.includes("ENOENT") && out.includes("FTS5"), "seeded facts reach the summary");
+});
+
+
+check("adoption trims overflow itself: newest kept, rest in ONE archive file", () => {
+	const dir = tmpBoard();
+	const sid = "seed-5";
+	const many = ["## Decisions", ...Array.from({ length: 40 }, (_, i) => `- decision number ${i}`)].join(String.fromCharCode(10));
+	const res = seedFromPriorSummary(dir, sid, CFG, many);
+	assert.ok(res.seeded);
+	assert.equal(res.total, 6, "only the newest 6 stay on the board");
+	assert.equal(res.dropped, 34, "the rest are archived");
+	assert.equal(res.archived.length, 1, "exactly one archive file, not 34");
+	const files = readdirSync(join(dir, "archive", sid));
+	assert.equal(files.length, 1, `one file expected, got ${files.join(",")}`);
+	const archived = readFileSync(join(dir, "archive", sid, files[0]), "utf8");
+	assert.ok(archived.includes("decision number 0"), "oldest archived line kept");
+	assert.ok(!archived.includes("decision number 39"), "newest stays on the board");
+	const md = readFileSync(join(dir, `${sid}.md`), "utf8");
+	assert.equal((md.match(/\(archived\)/g) ?? []).length, 1, "one pointer line, not one per rotation");
+	assert.ok(md.includes("decision number 39"), "newest decision is on the board");
+});
+
+check("adopted entries are not cut at the agent cap", () => {
+	const dir = tmpBoard();
+	const sid = "seed-6";
+	const NL = String.fromCharCode(10);
+	const long = ["## Files And Changes", `- modified src/engine.ts because ${"x".repeat(450)}`].join(NL);
+	seedFromPriorSummary(dir, sid, CFG, long);
+	const md = readFileSync(join(dir, `${sid}.md`), "utf8");
+	assert.ok(md.includes("x".repeat(450)), "a 450-char rationale must survive adoption");
 });
 
 // ── report ─────────────────────────────────────────────────────────────────

@@ -86,6 +86,180 @@ export function countAll(b: Board): number {
 	return n;
 }
 
+/** Marks a summary this extension produced (so it is never adopted back in). */
+export const BOARD_SUMMARY_MARKER = "# Session context checkpoint";
+
+/** Below this many real entries the board is not trusted as the summary. */
+export const BOARD_SUMMARY_FLOOR = 3;
+
+/** Real (non-pointer) entries on the board. */
+export function countReal(b: Board): number {
+	let n = 0;
+	for (const s of SECTIONS) {
+		for (const e of b.sections[s]) if (!e.text.startsWith("(archived)")) n++;
+	}
+	return n;
+}
+
+// ── adopting a pre-existing (native) summary ──────────────────────────────
+//
+// Enabling this extension mid-session means pi has already summarised the
+// earlier history into a compaction entry. Once the board becomes the summary,
+// that text is the only surviving record of it — so parse it into entries
+// instead of letting the next compaction overwrite it with an empty board.
+//
+// Routing is by summary header (pi native `## Goal`, `## Constraints &
+// Preferences`, vcc's `[Files And Changes]`, …), with content sniffing as a
+// second signal. Anything unrecognised lands in decisions rather than being
+// dropped: a slightly wrong section is recoverable at the next checkpoint,
+// a lost fact is not.
+
+const SUMMARY_HEADER_ROUTES: [RegExp, Section][] = [
+	[/scope change|goal|objective|目标|目的|task/i, "goal"],
+	[/preference|constraint|偏好|约束|style|rule/i, "prefs"],
+	[/next|todo|follow.?up|下一步|后续|待办/i, "next"],
+	[/issue|problem|blocker|error|bug|风险|问题|阻塞|失败|未解决|待解决/i, "issues"],
+	[/file|change|artifact|path|edit|文件|改动|修改|progress|done|completed|提交/i, "files"],
+	[/decision|choice|trade.?off|选择|决定|方案/i, "decisions"],
+];
+
+const SUMMARY_CONTENT_ROUTES: [RegExp, Section][] = [
+	[/\b(next step|next up|todo|下一步|接下来)\b/i, "next"],
+	[/\b(error|failed|exception|enoent|eacces|报错|失败|阻塞|卡在)\b/i, "issues"],
+	[/(?:^|[\s`'"])[A-Za-z]:[\\/][^\s]+|(?:^|\s)\.{0,2}\/[\w.-]+\/[\w./-]+|\b[\w-]+\.(?:ts|tsx|js|mjs|cjs|json|md|py|cs|gdshader|cpp|h|sh)\b/, "files"],
+	[/\b(prefer|must not|do not|always|never|要求|偏好|不要|必须)\b/i, "prefs"],
+	[/\b(decide|decided|chosen|instead of|rationale|决定|选择|理由)\b/i, "decisions"],
+];
+
+const JUNK_LINE =
+	/^(?:[-*+]\s*)?(?:\[?\s*(?:scope change|x|✓|✔|done|n\/a|none|todo|tbd|无|待填)\s*\]?|\(archived\).*|<!--.*-->)$/i;
+
+function routeSummaryHeader(header: string): Section | null {
+	for (const [re, section] of SUMMARY_HEADER_ROUTES) if (re.test(header)) return section;
+	return null;
+}
+
+function routeSummaryContent(line: string): Section | null {
+	for (const [re, section] of SUMMARY_CONTENT_ROUTES) if (re.test(line)) return section;
+	return null;
+}
+
+/**
+ * Flatten a compaction summary into board entries. Pure: no fs, no writes.
+ *
+ * Bullets and prose lines both become candidates; headers only route them.
+ * Sub-bullets are kept as their own entries — in a compaction summary a nested
+ * line is usually its own fact (a path, an error, a number).
+ */
+export function parseSummarySections(summary: string): { section: Section; text: string }[] {
+	const out: { section: Section; text: string }[] = [];
+	let header: Section | null = null;
+	let headerText = "";
+	for (const raw of String(summary ?? "").split(/\r?\n/)) {
+		const line = raw.trim();
+		if (!line) continue;
+		if (line.startsWith("<!--")) continue;
+		const md = /^#{1,6}\s+(.+?)\s*$/.exec(line);
+		const br = /^\[(.+?)\]\s*:?\s*$/.exec(line);
+		if (md || br) {
+			headerText = (md ? md[1] : (br as RegExpExecArray)[1]).trim();
+			// The board's own summary must never be adopted back in.
+			if (headerText.startsWith(BOARD_SUMMARY_MARKER)) {
+				header = null;
+				continue;
+			}
+			header = routeSummaryHeader(headerText);
+			continue;
+		}
+		const body = line.replace(/^[-*+]\s+/, "").replace(/^\[[ xX]\]\s*/, "").trim();
+		if (!body || JUNK_LINE.test(line)) continue;
+		// Content sniffing wins over the header: a "Progress" bullet naming an
+		// error is an issue, not a change.
+		const section = routeSummaryContent(body) ?? header ?? "decisions";
+		out.push({ section, text: body });
+	}
+	return out;
+}
+
+export type SeedResult =
+	| { seeded: false; reason: "own-summary" | "empty-summary" | "nothing-parseable" | "board-not-thin" }
+	| { seeded: true; total: number; counts: Record<string, number>; archived: string[]; dropped: number };
+
+/** Caps when adopting a foreign summary: keep the board readable as a summary. */
+const SEED_MAX_PER_SECTION = 6;
+/** Adopted lines get more room than agent-written ones (see below). */
+const SEED_MAX_ENTRY_CHARS = 600;
+
+/**
+ * Adopt a native compaction summary into the board.
+ *
+ * Refuses when the board already carries real content (never merge into curated
+ * entries) or when the summary is one we produced ourselves. Otherwise the
+ * parsed entries are committed through the normal path, so timestamps, dedupe,
+ * truncation and overflow rotation all apply.
+ */
+export function seedFromPriorSummary(
+	boardDir: string,
+	sessionId: string,
+	cfg: { maxEntriesPerSection: number; maxEntryChars: number },
+	summary: string,
+): SeedResult {
+	const text = String(summary ?? "");
+	if (!text.trim()) return { seeded: false, reason: "empty-summary" };
+	if (text.includes(BOARD_SUMMARY_MARKER)) return { seeded: false, reason: "own-summary" };
+
+	const existing = readBoardFile(boardDir, sessionId);
+	if (countReal(existing) >= BOARD_SUMMARY_FLOOR) return { seeded: false, reason: "board-not-thin" };
+
+	const parsed = parseSummarySections(text);
+	if (parsed.length === 0) return { seeded: false, reason: "nothing-parseable" };
+
+	// Adopted lines come from a summary we did not write, so they get room: a hard
+	// cut mid-rationale would lose the part that matters. Overflow is trimmed HERE
+	// (newest kept per section) rather than by the per-commit rotation, so the whole
+	// adoption produces exactly one archive file.
+	const grouped = new Map<Section, string[]>();
+	for (const p of parsed) {
+		const arr = grouped.get(p.section) ?? [];
+		arr.push(p.text);
+		grouped.set(p.section, arr);
+	}
+	const keep: CommitInput[] = [];
+	const dropped: { section: Section; text: string }[] = [];
+	for (const [section, texts] of grouped) {
+		if (texts.length <= SEED_MAX_PER_SECTION) {
+			for (const text of texts) keep.push({ section, text });
+			continue;
+		}
+		for (const text of texts.slice(0, -SEED_MAX_PER_SECTION)) dropped.push({ section, text });
+		for (const text of texts.slice(-SEED_MAX_PER_SECTION)) keep.push({ section, text });
+	}
+
+	const archivedRel = writeAdoptionArchive(boardDir, sessionId, dropped);
+	const res = commitEntries(boardDir, sessionId, { maxEntriesPerSection: 999, maxEntryChars: SEED_MAX_ENTRY_CHARS }, keep);
+	if (archivedRel) {
+		const board = res.board;
+		board.sections.archived.push({
+			ts: nowLocal(),
+			text: `(archived) ${dropped.length} entries from the prior compaction summary → ${archivedRel}`,
+		});
+		writeBoard(boardDir, sessionId, board);
+	}
+
+	const counts: Record<string, number> = {};
+	for (const s of SECTIONS) {
+		const n = res.board.sections[s].filter((e) => !e.text.startsWith("(archived)")).length;
+		if (n > 0) counts[s] = n;
+	}
+	return {
+		seeded: true,
+		total: res.committed,
+		counts,
+		archived: archivedRel ? [archivedRel] : [],
+		dropped: dropped.length,
+	};
+}
+
 /** Render the board back to markdown (stable section order; extras last). */
 export function renderBoard(b: Board): string {
 	const lines: string[] = [];
@@ -144,6 +318,44 @@ function writeArchiveFile(
 		...overflow.map((e) => `- [${e.ts}] ${e.text}`),
 		"",
 	];
+	const p = join(dir, name);
+	const tmp = `${p}.tmp`;
+	writeFileSync(tmp, lines.join("\n"), "utf-8");
+	renameSync(tmp, p);
+	return `archive/${safeSid(sessionId)}/${name}`;
+}
+
+/**
+ * One archive file for a whole adoption, grouped by section.
+ *
+ * writeArchiveFile is per-overflow, so adopting ~240 parsed lines through the
+ * normal commit path produced 200+ one-line archive files (measured). Adoption
+ * drops its own overflow up front and writes a single file instead.
+ */
+function writeAdoptionArchive(
+	boardDir: string,
+	sessionId: string,
+	dropped: { section: Section; text: string }[],
+): string | null {
+	if (dropped.length === 0) return null;
+	const dir = archiveDir(boardDir, sessionId);
+	mkdirSync(dir, { recursive: true });
+	const name = `adopted-${nowStamp()}.md`;
+	const ts = nowLocal();
+	const lines: string[] = [
+		`# Blackboard archive — session ${safeSid(sessionId)}`,
+		`<!-- written: ${new Date().toISOString()} | from: adopted prior compaction summary -->`,
+		"",
+	];
+	let current: Section | null = null;
+	for (const d of dropped) {
+		if (d.section !== current) {
+			current = d.section;
+			lines.push(`## From: ${SECTION_HEADERS[d.section]}`);
+		}
+		lines.push(`- [${ts}] ${d.text}`);
+	}
+	lines.push("");
 	const p = join(dir, name);
 	const tmp = `${p}.tmp`;
 	writeFileSync(tmp, lines.join("\n"), "utf-8");

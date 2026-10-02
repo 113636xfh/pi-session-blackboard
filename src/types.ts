@@ -63,6 +63,10 @@ export type SbbState = {
 	pendingCheckpoint: boolean;
 	/** how many times the current draft was injected unprocessed. */
 	draftInjectCount: number;
+	/** last time a foreign (native) compaction summary was adopted into the board. */
+	lastAdoption?: { source: "session_start" | "native-compaction"; at: string; total: number };
+	/** the one-shot scan for a pre-existing compaction summary has already run. */
+	priorSummaryChecked?: boolean;
 };
 
 /** Loose structural type for pi session branch entries (avoids pinning pi internals). */

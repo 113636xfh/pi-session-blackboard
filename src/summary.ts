@@ -20,12 +20,12 @@
 
 import type { Board } from "./types.js";
 import { SECTION_HEADERS, SECTIONS } from "./types.js";
-import { countAll } from "./board.js";
+import { BOARD_SUMMARY_FLOOR, countAll } from "./board.js";
 
 export const SUMMARY_DEFAULT_MAX_CHARS = 6000;
 
 /** Below this many real entries the board is not trusted as a summary. */
-export const SUMMARY_MIN_ENTRIES = 3;
+export const SUMMARY_MIN_ENTRIES = BOARD_SUMMARY_FLOOR;
 
 /** Newest-kept budget per section when rendering the summary. */
 const PER_SECTION: Record<string, number> = {

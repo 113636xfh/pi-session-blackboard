@@ -49,6 +49,7 @@ import {
 	readBoardFile,
 	renderBoard,
 	resetAll,
+	seedFromPriorSummary,
 	writeBoard,
 } from "./board.js";
 import { extractAll, normalizeBranch } from "./extract.js";
@@ -136,6 +137,78 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 		}
 	};
 
+	// ------------------------------------------------- adopting a prior summary
+	//
+	// Two triggers, one code path:
+	//  - `session_start`: the extension was enabled mid-session, so pi has
+	//    already summarised the earlier history into a compaction entry;
+	//  - `session_compact`: pi just summarised natively because the board was
+	//    too thin (or unreadable) — that text is the only record left of the
+	//    replaced messages.
+	// Either way the entries are adopted into the board, so the next compaction
+	// has something to work from. Only ever fills a THIN board: curated entries
+	// are never merged with, or diluted by, a foreign summary.
+
+	const adoptSummaryText = (
+		s: { cfg: SbbConfig; sessionId: string },
+		ctx: AnyCtx,
+		summary: string,
+		reason: "session_start" | "native-compaction",
+	): void => {
+		if (!s.cfg.seedFromPriorSummary) return;
+		const res = seedFromPriorSummary(s.cfg.boardDir, s.sessionId, s.cfg, summary);
+		if (!res.seeded) {
+			debug(s, { event: "summary_not_adopted", reason: res.reason, trigger: reason });
+			return;
+		}
+		mirror(s, readBoardFile(s.cfg.boardDir, s.sessionId), `adopted:${reason}`);
+		debug(s, { event: "summary_adopted", trigger: reason, total: res.total, counts: res.counts, archived: res.archived.length });
+		const st = loadState(s.cfg.boardDir, s.sessionId);
+		st.boardVersion += 1;
+		st.lastAdoption = { source: reason, at: new Date().toISOString(), total: res.total };
+		saveState(s.cfg.boardDir, s.sessionId, st);
+		const detail = Object.entries(res.counts)
+			.map(([k, n]) => `${k}:${n}`)
+			.join(" ");
+		ctx?.ui?.notify?.(
+			`session-blackboard adopted the previous compaction summary — ${res.total} entries (${detail}). Review them at the next checkpoint.`,
+			"info",
+		);
+	};
+
+	/**
+	 * Adopt a prior native summary once per session, on whichever hook fires first.
+	 *
+	 * `session_start` is not guaranteed to run (measured: an RPC pi process never
+	 * fires it), so the same check also runs from the first processed turn and is
+	 * guarded by a state flag rather than by which event showed up.
+	 */
+	const maybeAdoptPriorSummary = (s: { cfg: SbbConfig; sessionId: string }, ctx: AnyCtx): void => {
+		if (!s.cfg.seedFromPriorSummary) return;
+		const st = loadState(s.cfg.boardDir, s.sessionId);
+		if (st.priorSummaryChecked) return;
+		st.priorSummaryChecked = true;
+		saveState(s.cfg.boardDir, s.sessionId, st);
+		adoptPriorSummary(s, ctx, "session_start");
+	};
+
+	const adoptPriorSummary = (s: { cfg: SbbConfig; sessionId: string }, ctx: AnyCtx, reason: "session_start"): void => {
+		try {
+			const entries = (ctx?.sessionManager?.getEntries?.() ?? []) as Array<Record<string, unknown>>;
+			for (let i = entries.length - 1; i >= 0; i--) {
+				const e = entries[i];
+				if (e?.type !== "compaction") continue;
+				const summary = typeof (e as { summary?: unknown }).summary === "string" ? ((e as { summary: string }).summary) : "";
+				if (summary.trim()) {
+					adoptSummaryText(s, ctx, summary, reason);
+					return;
+				}
+			}
+		} catch {
+			/* no session manager / unreadable session */
+		}
+	};
+
 	const renderCheckpoint = (draft: PendingDraft, cfg: SbbConfig): string => {
 		const parts: string[] = [
 			"[session-blackboard checkpoint]",
@@ -187,6 +260,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 
 		const st = loadState(s.cfg.boardDir, s.sessionId);
 		st.turnsSinceCheckpoint += 1;
+		maybeAdoptPriorSummary(s, ctx);
 
 		// Window of entries since the last processed cursor.
 		let startIdx = 0;
@@ -262,9 +336,57 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 			s.cfg = loadConfig(s.cwd); // refresh after config edits / resume
 			if (s.cfg.enabled) {
 				ctx?.ui?.notify?.(`session-blackboard active — board: ${boardPath(s.cfg.boardDir, s.sessionId)}`, "info");
+				maybeAdoptPriorSummary(s, ctx);
 			}
 		} catch {
 			/* never break session start */
+		}
+	});
+
+	// pi summarised without us: either the board was too thin to be trusted as a
+	// summary, or the board could not be read/rendered. That summary is the only
+	// record of the replaced messages — adopt it, so the NEXT compaction can use
+	// the board instead of asking the model again.
+	pi.on("session_compact", async (e, ctx) => {
+		try {
+			const s = getSession(ctx);
+			// Unconditional entry log: distinguishes "handler never called" from
+			// "called but bailed early" in the debug trail.
+			debug(s, {
+				event: "session_compact_hook",
+				sessionId: s.sessionId,
+				cwd: s.cwd,
+				summaryLen: typeof (e as { compactionEntry?: { summary?: unknown } })
+					.compactionEntry?.summary === "string"
+					? ((e as { compactionEntry: { summary: string } }).compactionEntry.summary).length
+					: -1,
+			});
+			if (!s.cfg.enabled || !s.cfg.seedFromPriorSummary) return;
+			// When this extension itself produced the compaction (board-as-summary),
+			// the carried summary IS the board's own rendering — adopting it would
+			// parse the board back into itself and duplicate every entry.
+			if ((e as { fromExtension?: boolean }).fromExtension) {
+				debug(s, { event: "summary_not_adopted", reason: "board-generated", trigger: "native-compaction" });
+				return;
+			}
+			const entry = (e as { compactionEntry?: { summary?: unknown } }).compactionEntry;
+			const summary = typeof entry?.summary === "string" ? entry.summary : "";
+			if (!summary.trim()) {
+				debug(s, { event: "summary_not_adopted", reason: "empty-summary", trigger: "native-compaction" });
+				return;
+			}
+			adoptSummaryText(s, ctx, summary, "native-compaction");
+		} catch (err) {
+			// Never break compaction, but do not vanish silently either: a hook that
+			// throws here is indistinguishable from "adoption never worked".
+			try {
+				debug(getSession(ctx), {
+					event: "summary_adopt_error",
+					error: err instanceof Error ? err.message : String(err),
+				});
+			} catch {
+				/* ignore */
+			}
 		}
 	});
 
