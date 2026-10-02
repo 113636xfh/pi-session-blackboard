@@ -254,6 +254,20 @@ Queries are literal substrings copied out of the conversation (paths, function
 names, error fragments) — not natural-language questions. Output is a compact
 card, newest last, hard-capped (`limit`, default 20, max 60).
 
+**Every hit is one line plus its locator**, never a blob:
+
+```
+- [board · Decisions] - [2026-10-02 14:46] 薄板自动回退原生：黑板真实条目 < 3 条时返回 null …
+- [archive/board-…0005.md · From: Goal] - [2026-10-02 14:46] …尚未验证第一次压缩走黑板
+- [snapshot/2291@07-11-24 · Goal] 主线：…板子刚开始积累，尚未验证第一次压缩走黑板
+```
+
+Digests are walked field by field, so a snapshot hit is the single board line
+that matched, attributed to its section (`recentFiles` reports as `Files`) and
+stamped with when it was mirrored. Numbers and the `counts` object are skipped —
+matching a count is noise, not a fact. `full: true` restores the old behaviour
+(dump whole digests) for when you really want a board state, not a fact.
+
 ### Legacy: compaction assist (`compactAssist`, off by default)
 
 **Assist, don't replace.** When pi's native compaction runs (manual `/compact`,

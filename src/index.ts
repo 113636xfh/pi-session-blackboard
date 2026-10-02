@@ -29,7 +29,12 @@ import { compact, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type, type TLiteral } from "typebox";
 
 import { renderAssistSection } from "./compact-assist.js";
-import { formatRecall, searchDocument, type RecallHit } from "./recall.js";
+import {
+	formatRecall,
+	searchDigest,
+	searchDocument,
+	type RecallHit,
+} from "./recall.js";
 import { renderSummary } from "./summary.js";
 import type { SbbConfig } from "./config.js";
 import { loadConfig } from "./config.js";
@@ -746,10 +751,16 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Prefer blackboard_recall over re-reading the summary when you need a specific earlier fact (a path, an error, a decision that is not in the summary).",
 			"Search with a literal substring copied from the conversation, not a paraphrase.",
+			"Results are one line per match, tagged with where it came from (board · Section, archive/<file> · From: Section, snapshot/<i>@hh-mm-ss · Section) — grep again with a longer substring to narrow, or pass full=true only when you need to restore a whole board state.",
 		],
 		parameters: Type.Object({
 			query: Type.String({ description: "substring to find (case-insensitive), e.g. a file path, function name or error text" }),
 			limit: Type.Optional(Type.Number({ description: "max matching lines (default 20, max 60)" })),
+			full: Type.Optional(
+				Type.Boolean({
+					description: "return whole snapshot digests instead of just the matching lines (only when restoring the full board state)",
+				}),
+			),
 		}),
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		async execute(_toolCallId: string, params: any, _signal: AbortSignal, _onUpdate: unknown, ctx: AnyCtx) {
@@ -760,6 +771,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 				const query = typeof params?.query === "string" ? params.query : "";
 				if (!query.trim()) return text('blackboard_recall needs a non-empty "query".');
 				const limit = Math.max(1, Math.min(60, Number(params?.limit) || 20));
+				const full = params?.full === true;
 
 				const hits: RecallHit[] = [];
 				// live board
@@ -780,14 +792,21 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 						/* no archive */
 					}
 				}
-				// session digests (sbb-snapshot entries)
+				// session digests (sbb-snapshot entries) — one hit per matching line,
+				// attributed to the digest field it came from; `full` dumps the blob.
 				if (hits.length < limit) {
 					try {
 						const entries = (ctx?.sessionManager?.getEntries?.() ?? []) as Array<Record<string, unknown>>;
 						entries.forEach((entry, i) => {
 							if (hits.length >= limit) return;
 							if (entry?.type !== "custom" || entry?.customType !== "sbb-snapshot") return;
-							hits.push(...searchDocument(JSON.stringify(entry.data ?? {}), query, limit - hits.length, `snapshot/${i}`));
+							const data = (entry.data ?? {}) as Record<string, unknown>;
+							if (full) {
+								hits.push(...searchDocument(JSON.stringify(data), query, limit - hits.length, `snapshot/${i}`));
+								return;
+							}
+							const at = typeof data.at === "string" ? data.at.slice(11, 19).replace(/:/g, "-") : "";
+							hits.push(...searchDigest(data, query, limit - hits.length, at ? `snapshot/${i}@${at}` : `snapshot/${i}`));
 						});
 					} catch {
 						/* no session manager */

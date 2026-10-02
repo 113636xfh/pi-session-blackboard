@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { renderSummary, SUMMARY_MIN_ENTRIES } from "../build/summary.js";
-import { formatRecall, searchDocument } from "../build/recall.js";
+import { formatRecall, searchDigest, searchDocument } from "../build/recall.js";
 import { renderAssistSection } from "../build/compact-assist.js";
 import { commitEntries, readBoardFile } from "../build/board.js";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
@@ -210,6 +210,45 @@ check("one commit batch can supersede several stale lines at once", () => {
 	assert.equal(r.supersedeMisses.length, 0);
 	const md = readFileSync(join(dir, `${sid}.md`), "utf8");
 	assert.ok(!md.includes("model A") && !md.includes("cache B"), "both stale lines gone");
+});
+
+
+// ── snapshot digests: one hit per matching line, not the whole blob ───────
+const DIGEST = {
+	v: 1,
+	at: "2026-10-02T07:11:24.506Z",
+	session: "01a0f1c6-d229-7785-9040-c46352c6bcf0",
+	goal: ["主线：让压缩不丢事实", "板子刚开始积累，尚未验证第一次压缩走黑板"],
+	next: ["读 verification/shots/mcp_20261002_123347894.png 确认棕块"],
+	recentFiles: ["blackboard 仓库根 C:/Users/…/pi-session-blackboard", "settings.json 的 packages 改为裸字符串"],
+	openIssues: 2,
+	counts: { goal: 2, decisions: 10, next: 2 },
+};
+
+check("a digest hit is the matching line, located by its section", () => {
+	const hits = searchDigest(DIGEST, "尚未验证", 5, "snapshot/7@07-11-24");
+	assert.equal(hits.length, 1, "one matching line, not the whole JSON");
+	assert.equal(hits[0].section, "Goal", "recentFiles must be labelled Files, not the JSON key");
+	assert.ok(hits[0].line.includes("尚未验证"));
+	assert.ok(!hits[0].line.includes('"counts"'), "the blob must not leak into the line");
+	assert.ok(formatRecall(hits, "尚未验证").length < 400, "the card must stay small");
+});
+
+check("digest hits carry per-field sections and can be narrowed by limit", () => {
+	const many = searchDigest(DIGEST, "e", 20, "snapshot/7");
+	assert.ok(many.length > 1);
+	assert.ok(many.every((h) => h.section !== ""), "every digest hit is attributable");
+	const capped = searchDigest(DIGEST, "e", 2, "snapshot/7");
+	assert.equal(capped.length, 2, "limit caps digest hits too");
+});
+
+check("digest search ignores counts/numbers but finds the session id", () => {
+	assert.equal(searchDigest(DIGEST, "counts", 5, "s").length, 0, "matching a count is noise");
+	assert.equal(searchDigest(DIGEST, "openIssues", 5, "s").length, 0, "a bare number is not a fact");
+	const byId = searchDigest(DIGEST, "01a0f1c6", 5, "s");
+	assert.equal(byId.length, 1);
+	assert.equal(byId[0].section, "session");
+	assert.ok(searchDigest(DIGEST, "2026-10-02", 5, "s").length === 0, "the `at` stamp alone is not a hit");
 });
 
 // ── report ─────────────────────────────────────────────────────────────────
