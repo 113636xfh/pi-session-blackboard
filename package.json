@@ -1,0 +1,25 @@
+{
+  "name": "pi-session-blackboard",
+  "version": "0.1.0",
+  "description": "Session-level blackboard for pi coding agent: deterministic per-turn extraction, agent-curated commits, deterministic archival. Zero background LLM calls.",
+  "type": "module",
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.3",
+    "@resvg/resvg-js": "^2.6.2",
+    "@types/node": "^22.0.0",
+    "typebox": "^1.1.38",
+    "typescript": "^5.6.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc src/extract.ts src/board.ts src/types.ts src/paths.ts src/state.ts src/compact-assist.ts src/summary.ts src/recall.ts --outDir build --module NodeNext --target ES2022 --moduleResolution NodeNext --esModuleInterop --skipLibCheck --strict",
+    "test": "npm run build && node test/smoke.mjs",
+    "docs:render": "node docs/render.mjs"
+  }
+}

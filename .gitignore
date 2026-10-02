@@ -1,0 +1,15 @@
+node_modules/
+dist/
+build/
+*.log
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+
+# local agent state that must never be committed
+.env
+.env.*
+
+# machine-specific tsc configs (absolute paths into this box's installs)
+tsconfig.check.json
+tsconfig.build.json
