@@ -63,34 +63,6 @@ type AnyCtx = any;
 const COMMIT_SECTIONS: Section[] = SECTIONS.filter((s) => s !== "archived");
 
 export default function sessionBlackboard(pi: ExtensionAPI) {
-	// ------------------------------------------------------------- load-time probe
-	// Diagnostic (temp): pin down WHEN `blackboard` first appears in the active
-	// tool list in SDK sessions — at module load, or later. Dumps getActiveTools()
-	// at extension-load time and +1s/+5s to <boardDir>/debug/module-<pid>.ndjson.
-	try {
-		const probeApi = pi as unknown as { getActiveTools?: () => string[] };
-		const probeDir = join(process.env.HOME ?? "/tmp", ".pi", "agent", "blackboard", "debug");
-		mkdirSync(probeDir, { recursive: true });
-		const pf = join(probeDir, `module-${process.pid}.ndjson`);
-		const probe = (tag: string) => {
-			try {
-				let act: unknown = null;
-				try {
-					act = probeApi.getActiveTools?.();
-				} catch {
-					act = "threw";
-				}
-				appendFileSync(pf, `${JSON.stringify({ at: new Date().toISOString(), tag, activeTools: act })}\n`);
-			} catch {
-				/* ignore */
-			}
-		};
-		probe("ext_loaded");
-		setTimeout(() => probe("ext_loaded_+1s"), 1000);
-		setTimeout(() => probe("ext_loaded_+5s"), 5000);
-	} catch {
-		/* ignore */
-	}
 	const sessions = new Map<string, { cfg: SbbConfig; sessionId: string; cwd: string }>();
 
 	// --------------------------------------------------------------- helpers
