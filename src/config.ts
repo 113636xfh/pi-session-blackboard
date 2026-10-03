@@ -57,6 +57,15 @@ export type SbbConfig = {
 	seedFromPriorSummary: boolean;
 	/** max draft lines rendered into a checkpoint message. */
 	maxDraftLines: number;
+	/**
+	 * "Near compaction" zone, in tokens left until pi's own compaction trigger
+	 * (`contextTokens > contextWindow - reserveTokens`). Inside the zone the
+	 * checkpoint message carries a live token countdown and is injected EVERY
+	 * turn instead of every `checkpointTurns`, because the next turn may be the
+	 * last one before the board becomes the summary. 0 disables the countdown
+	 * (behaviour falls back to the plain cadence).
+	 */
+	compactionWarnTokens: number;
 	debugLog: boolean;
 };
 
@@ -77,6 +86,7 @@ export const DEFAULTS: SbbConfig = {
 	maxEntryChars: 300,
 	maxDraftLines: 60,
 	seedFromPriorSummary: true,
+	compactionWarnTokens: 32768,
 	debugLog: false,
 };
 
@@ -90,6 +100,120 @@ function readSection(path: string): Record<string, unknown> {
 	} catch {
 		return {};
 	}
+}
+
+function readRawSection(path: string, key: string): Record<string, unknown> {
+	try {
+		if (!existsSync(path)) return {};
+		const raw = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+		if (!raw || typeof raw !== "object") return {};
+		const nested = (raw as Record<string, unknown>)[key];
+		return nested && typeof nested === "object" ? (nested as Record<string, unknown>) : {};
+	} catch {
+		return {};
+	}
+}
+
+/** pi's built-in compaction reserve (DEFAULT_COMPACTION_SETTINGS.reserveTokens). */
+export const PI_DEFAULT_RESERVE_TOKENS = 16384;
+
+type CompactionSection = Record<string, unknown>;
+
+/**
+ * Pure half of reserve resolution, so the precedence is testable without
+ * touching the real settings files. `sources` is in INCREASING priority order
+ * ([user, project]); pi merges project settings over user settings.
+ */
+export function resolveReserveFromSources(sources: CompactionSection[], modelKey?: string): number {
+	const overrideAt = (o: CompactionSection): unknown => {
+		if (!modelKey || typeof o.modelOverrides !== "object" || !o.modelOverrides) return undefined;
+		return (o.modelOverrides as Record<string, Record<string, unknown>>)[modelKey]?.reserveTokens;
+	};
+	const num = (v: unknown): number | undefined =>
+		typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : undefined;
+	// model override (highest-priority source first) -> ordinary setting -> default
+	for (const o of [...sources].reverse()) {
+		const v = num(overrideAt(o));
+		if (v !== undefined) return v;
+	}
+	for (const o of [...sources].reverse()) {
+		const v = num(o.reserveTokens);
+		if (v !== undefined) return v;
+	}
+	return PI_DEFAULT_RESERVE_TOKENS;
+}
+
+/**
+ * Resolve pi's compaction `reserveTokens` the way pi does: model override →
+ * ordinary setting (user, then project) → built-in default. Mirrored here (not
+ * imported) so the countdown states the same trigger line pi will actually use.
+ */
+export function resolveReserveTokens(cwd: string, modelKey?: string): number {
+	return resolveReserveFromSources(
+		[
+			readRawSection(join(getAgentDir(), "settings.json"), "compaction"),
+			readRawSection(join(cwd, ".pi", "settings.json"), "compaction"),
+		],
+		modelKey,
+	);
+}
+
+/** Everything the checkpoint prompt needs to say how close compaction is. */
+export type ContextPressure = {
+	/** estimated context tokens now (null right after compaction, before the next response) */
+	tokens: number | null;
+	contextWindow: number;
+	reserveTokens: number;
+	/** token count at which pi triggers compaction */
+	triggerAt: number;
+	/** tokens left until that trigger (negative = already past the line) */
+	remaining: number | null;
+	/** inside the warn zone: commit the board every turn */
+	near: boolean;
+};
+
+export function computePressure(
+	usage: { tokens: number | null; contextWindow: number } | undefined,
+	cwd: string,
+	modelKey: string | undefined,
+	warnTokens: number,
+): ContextPressure | null {	if (!usage || typeof usage.contextWindow !== "number" || usage.contextWindow <= 0) return null;
+	const reserveTokens = resolveReserveTokens(cwd, modelKey);
+	const triggerAt = usage.contextWindow - reserveTokens;
+	const tokens = typeof usage.tokens === "number" && Number.isFinite(usage.tokens) ? usage.tokens : null;
+	const remaining = tokens === null ? null : triggerAt - tokens;
+	return {
+		tokens,
+		contextWindow: usage.contextWindow,
+		reserveTokens,
+		triggerAt,
+		remaining,
+		near: warnTokens > 0 && remaining !== null && remaining <= warnTokens,
+	};
+}
+
+/** 1234 -> "1.2k" — token counts in the prompt stay short enough to read. */
+export function fmtTokens(n: number): string {
+	const v = Math.round(n);
+	if (Math.abs(v) < 1000) return String(v);
+	if (Math.abs(v) < 100000) return `${(v / 1000).toFixed(1)}k`;
+	return `${Math.round(v / 1000)}k`;
+}
+
+/**
+ * The one line the checkpoint prompt spends on "how far is compaction". Inside
+ * the warn zone it is an instruction, not a statistic. Returns null when the
+ * token count is unknown (right after a compaction, before the next response).
+ */
+export function describePressure(p: ContextPressure | null | undefined): string | null {
+	if (!p || p.remaining === null) return null;
+	const left = p.remaining;
+	const line =
+		`[context pressure] compaction is ${left <= 0 ? "OVERDUE" : `${fmtTokens(left)} away`} — context is at ${fmtTokens(p.tokens ?? 0)} of ${fmtTokens(p.contextWindow)} tokens (pi compacts above ${fmtTokens(p.triggerAt)} = window − reserve ${fmtTokens(p.reserveTokens)}).`;
+	if (p.near) {
+		return `${line} NEAR COMPACTION — commit what matters from this turn onto the board NOW, even if the draft below looks thin or already known: whatever is not on the board when compaction fires is gone.`;
+	}
+	return `${line} Plan the next commits so the board stays sufficient if compaction fires sooner than expected.`;
 }
 
 function pickBool(o: Record<string, unknown>, k: string, dflt: boolean): boolean {
@@ -122,6 +246,7 @@ export function loadConfig(cwd: string): SbbConfig {
 	cfg.maxBoardLines = Math.max(50, Math.floor(pickNum(all, "maxBoardLines", cfg.maxBoardLines)));
 	cfg.maxEntryChars = Math.max(100, Math.floor(pickNum(all, "maxEntryChars", cfg.maxEntryChars)));
 	cfg.maxDraftLines = Math.max(10, Math.floor(pickNum(all, "maxDraftLines", cfg.maxDraftLines)));
+	cfg.compactionWarnTokens = Math.max(0, Math.floor(pickNum(all, "compactionWarnTokens", cfg.compactionWarnTokens)));
 	cfg.seedFromPriorSummary = pickBool(all, "seedFromPriorSummary", cfg.seedFromPriorSummary);
 	cfg.mirrorToSession = pickBool(all, "mirrorToSession", cfg.mirrorToSession);
 	cfg.compaction = (["off", "digest", "board"] as const).includes(pickStr(all, "compaction", cfg.compaction) as "off" | "digest" | "board")

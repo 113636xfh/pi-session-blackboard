@@ -36,8 +36,8 @@ import {
 	type RecallHit,
 } from "./recall.js";
 import { renderSummary } from "./summary.js";
-import type { SbbConfig } from "./config.js";
-import { loadConfig } from "./config.js";
+import type { ContextPressure, SbbConfig } from "./config.js";
+import { computePressure, describePressure, loadConfig } from "./config.js";
 import { archiveDir, boardPath, debugPath, safeSid } from "./paths.js";
 import { defaultState, loadState, saveState } from "./state.js";
 import {
@@ -209,9 +209,32 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 		}
 	};
 
-	const renderCheckpoint = (draft: PendingDraft, cfg: SbbConfig): string => {
-		const parts: string[] = [
-			"[session-blackboard checkpoint]",
+	/**
+	 * How close pi is to its own compaction trigger right now. Null when the
+	 * context window is unknown (no model yet) or the countdown is disabled.
+	 */
+	const pressureOf = (s: { cfg: SbbConfig; cwd: string }, ctx: AnyCtx): ContextPressure | null => {
+		try {
+			const usage = ctx?.getContextUsage?.();
+			if (!usage) return null;
+			const model = ctx?.model;
+			const modelKey = model?.provider && model?.id ? `${model.provider}/${model.id}` : undefined;
+			return computePressure(usage, s.cwd, modelKey, s.cfg.compactionWarnTokens);
+		} catch {
+			return null;
+		}
+	};
+
+	const renderCheckpoint = (draft: PendingDraft | null, cfg: SbbConfig, pressure?: ContextPressure | null): string => {
+		const parts: string[] = ["[session-blackboard checkpoint]"];
+		// How close compaction is. In the warn zone this line is an instruction,
+		// not a statistic: the next turn may be the last one before the board
+		// becomes the summary.
+		if (pressure && cfg.compactionWarnTokens > 0) {
+			const line = describePressure(pressure);
+			if (line) parts.push(line);
+		}
+		parts.push(
 			"A draft of the session blackboard was compiled deterministically (no LLM) from turns since the last checkpoint.",
 			"IMPORTANT — what you commit here IS the compaction summary. When this session runs out of context, pi replaces everything before the retained tail with your blackboard entries (no separate summarization model runs). Your future self reads these lines, not the conversation. Write them the way you would write a checkpoint summary for another LLM that has to continue this work:",
 			`  - goal: what is being asked, including scope changes and corrections;`,
@@ -221,7 +244,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 			`  - issues: blockers with the real error text and exit codes; resolved ones must be moved or marked resolved;`,
 			`  - next: the concrete next step, not "continue working";`,
 			`  - prefs: durable constraints and preferences the user stated.`,
-			...(draft.experiments?.length
+			...(draft?.experiments?.length
 				? [`Experiments detected this period: ${draft.experiments.join("; ")}. If any produced a key finding, commit one line per finding under findings (what was tested, the result, why it was non-obvious). If none were non-obvious, say nothing.`]
 				: []),
 			`Review the draft: correct inaccuracies, delete noise, then commit what is worth keeping via the \`blackboard\` tool (action="commit", entries=[{section, text, supersedes?}]). Sections: ${COMMIT_SECTIONS.join(", ")}. Each text must be ONE line, factual and specific, max ${cfg.maxEntryChars} chars — timestamps are added automatically. Preserve exact file paths, function names, error messages and numbers.`,
@@ -229,16 +252,17 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 			`When a fact CHANGED, put it on the new line and set supersedes="<unique substring of the old line>": the old line is archived in the same call, so the summary can never show both versions.`,
 			"If nothing is worth keeping, call the tool with action=\"skip\".",
 			"--- draft ---",
-		];
+		);
+		const sections = draft?.sections ?? {};
 		let any = false;
 		for (const s of SECTIONS) {
-			const lines = draft.sections[s] ?? [];
+			const lines = sections[s] ?? [];
 			if (!lines.length) continue;
 			any = true;
 			parts.push(`## ${s}`);
 			parts.push(...lines.slice(0, cfg.maxDraftLines).map((l) => `- ${l}`));
 		}
-		if (!any) parts.push("(empty draft)");
+		if (!any) parts.push(draft ? "(empty draft)" : "(no new deterministic entries this round)");
 		parts.push("--- end draft ---");
 		return parts.join("\n");
 	};
@@ -311,13 +335,31 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 			}
 		}
 
-		// Checkpoint trigger.
-		if (st.pendingDraft && st.turnsSinceCheckpoint >= s.cfg.checkpointTurns) {
+		// Checkpoint trigger. Normally every `checkpointTurns` user turns — but
+		// inside the near-compaction zone EVERY turn counts: the board may become
+		// the summary at the end of this one, and the countdown rides along.
+		const pressure = pressureOf(s, ctx);
+		const near = pressure?.near === true;
+		const due = st.turnsSinceCheckpoint >= s.cfg.checkpointTurns || near;
+		if (due) {
 			st.pendingCheckpoint = true;
+			// A near-compaction nudge is a standing reminder, not an unprocessed
+			// draft: it must not burn one of the 3 tolerated misses.
+			if (near) st.draftInjectCount = 0;
+			if (!st.pendingDraft && near) {
+				// Nothing deterministic to show, but the reminder still has to
+				// reach the agent — commit-worthy facts are exactly what extraction
+				// cannot see.
+				st.pendingDraft = { generatedAt: new Date().toISOString(), sections: {} };
+			}
 			if (s.cfg.delivery === "immediate") {
 				try {
 					pi.sendMessage(
-						{ customType: "sbb-checkpoint", content: renderCheckpoint(st.pendingDraft, s.cfg), display: false },
+						{
+							customType: "sbb-checkpoint",
+							content: renderCheckpoint(st.pendingDraft, s.cfg, pressure),
+							display: false,
+						},
 						{ deliverAs: "steer", triggerTurn: true },
 					);
 					st.pendingCheckpoint = false;
@@ -333,6 +375,8 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 			freshEntries: fresh.length,
 			draftLines: countDraftLines(st.pendingDraft?.sections as DraftSections | undefined),
 			pendingCheckpoint: st.pendingCheckpoint,
+			nearCompaction: near,
+			remainingTokens: pressure?.remaining ?? null,
 		});
 	};
 
@@ -419,8 +463,12 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 			ensureBlackboardActive(s);
 			ensureBlackboardInactive(s);
 			const st = loadState(s.cfg.boardDir, s.sessionId);
-			if (st.pendingCheckpoint && st.pendingDraft) {
-				if (st.draftInjectCount >= 3) {
+			if (st.pendingCheckpoint) {
+				// Fresh reading for this turn: the number must describe the context
+				// the agent is about to run in, not the one from last turn.
+				const pressure = pressureOf(s, ctx);
+				const near = pressure?.near === true;
+				if (st.draftInjectCount >= 3 && !near) {
 					try {
 						ctx?.ui?.notify?.(
 							"session-blackboard: pending draft unprocessed 3× — commit it via the blackboard tool, or run /bb skip",
@@ -433,11 +481,17 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 					saveState(s.cfg.boardDir, s.sessionId, st);
 					return;
 				}
-				const content = renderCheckpoint(st.pendingDraft, s.cfg);
+				const content = renderCheckpoint(st.pendingDraft, s.cfg, pressure);
 				st.pendingCheckpoint = false;
-				st.draftInjectCount += 1;
+				if (near) st.draftInjectCount = 0;
+				else st.draftInjectCount += 1;
 				saveState(s.cfg.boardDir, s.sessionId, st);
-				debug(s, { event: "checkpoint_injected", draftLines: countDraftLines(st.pendingDraft.sections) });
+				debug(s, {
+					event: "checkpoint_injected",
+					draftLines: countDraftLines(st.pendingDraft?.sections as DraftSections | undefined),
+					nearCompaction: near,
+					remainingTokens: pressure?.remaining ?? null,
+				});
 				return {
 					message: { customType: "sbb-checkpoint", content, display: false },
 				};

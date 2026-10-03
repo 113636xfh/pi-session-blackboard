@@ -17,8 +17,8 @@
     "typescript": "^5.6.0"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "build": "tsc src/extract.ts src/board.ts src/types.ts src/paths.ts src/state.ts src/compact-assist.ts src/summary.ts src/recall.ts --outDir build --module NodeNext --target ES2022 --moduleResolution NodeNext --esModuleInterop --skipLibCheck --strict",
+    "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit",
+    "build": "node ./node_modules/typescript/bin/tsc src/extract.ts src/board.ts src/types.ts src/paths.ts src/state.ts src/compact-assist.ts src/summary.ts src/recall.ts src/config.ts --outDir build --module NodeNext --target ES2022 --moduleResolution NodeNext --esModuleInterop --skipLibCheck --strict",
     "test": "npm run build && node test/smoke.mjs",
     "docs:render": "node docs/render.mjs"
   }

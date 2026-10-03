@@ -171,7 +171,31 @@ digest 逐字段搜索：命中输出的是单条板条目 + 节归属（`recent
    TUI 保持干净，随时 `/bb` 查看。
 
 3. 草稿被连续忽略 3 次 → 停止注入并在 TUI 显示警告（`/bb` 仍可见全部，
-   `/bb skip` 可清空）。
+   `/bb skip` 可清空）。**临近压缩时例外**：倒计时提醒不算“被忽略”，不消耗这 3 次额度。
+
+### 距压缩倒计时：快到线时每回合都提醒
+
+checkpoint 消息里始终带一行**距离压缩还有多少 token**（数据来自
+`ctx.getContextUsage()`，压缩线按 pi 自己的算法算：`contextWindow − reserveTokens`，
+`reserveTokens` 从 model override → 项目设置 → 用户设置 → 内置 16384 依次解析，
+与 pi 的 `shouldCompact()` 完全一致）：
+
+```
+[context pressure] compaction is 3.3k away — context is at 95.0k of 131k tokens
+(pi compacts above 98.3k = window − reserve 32.8k). NEAR COMPACTION — commit what
+matters from this turn onto the board NOW, even if the draft below looks thin or
+already known: whatever is not on the board when compaction fires is gone.
+```
+
+剩余 ≤ `compactionWarnTokens`（默认 32768）即进入**临近区**，此时：
+
+- checkpoint **改为每回合投递**（无视 `checkpointTurns`），草稿为空也照样提醒——
+  抽取看不见的恰恰是值得记的事实；
+- 提示语从“规划”变成“立刻 commit”，并带上 `NEAR COMPACTION` 字样；
+- 不消耗“连续忽略 3 次”的额度（这是常驻提醒，不是被忽略的草稿）。
+
+刚压缩完、下一条回复还没来时 token 数为 null → **不显示任何行**（不编造警报）。
+`compactionWarnTokens: 0` 关闭整个倒计时与每回合投递。
 
 ## `blackboard` 工具
 
@@ -223,6 +247,7 @@ digest 逐字段搜索：命中输出的是单条板条目 + 节归属（`recent
     "maxEntriesPerSection": 40,   // 每节轮转阈值
     "maxEntryChars": 300,         // 每条上限
     "maxDraftLines": 60,          // checkpoint 渲染的草稿大小上限
+    "compactionWarnTokens": 32768, // 距压缩 ≤ 此 token 数即进入临近区（每回合提醒）；0 = 关闭
     "mirrorToSession": true,      // 紧凑 digest → 会话 JSONL（sbb-snapshot）
     "compaction": "board",        // "board"（板即摘要）| "digest" | "off"
     "summaryMaxChars": 6000,      // 板渲染为摘要的硬上限
@@ -239,6 +264,8 @@ digest 逐字段搜索：命中输出的是单条板条目 + 节归属（`recent
 - **`delivery: "next-turn"`**（默认）：checkpoint 随你下条消息注入，零额外 LLM
   调用。`"immediate"` 立即派发 steer 消息触发一轮短审校（小额外调用，前缀
   基本走缓存）——适合「下一条用户消息」还很远的无人值守运行。
+- **`compactionWarnTokens`**（默认 32768）：剩余 token 低于它就算「临近压缩」，
+  checkpoint 改为每回合投递并携带倒计时。设 `0` 关闭。
 
 ### Legacy：compaction assist（`compactAssist`，默认关）
 
@@ -288,11 +315,18 @@ npm test           # build (tsc -> build/) + node test/smoke.mjs
 npm run docs:render  # SVG -> PNG（resvg，确定性，无浏览器）
 ```
 
+> **路径里带 `&` 的坑**（本仓库在 `D:\01-R&D\…` 下）：npm 脚本会把 `node_modules\.bin`
+> 里的 shim 解析成含 `&` 的绝对路径，cmd.exe 会把它当命令分隔符，于是报
+> `'D:\Project-…\node_modules\.bin\' 不是内部或外部命令`。因此 `build`/`typecheck`
+> 脚本**不走裸 `tsc`**，而是 `node ./node_modules/typescript/bin/tsc`（相对路径里没有 `&`）。
+> 手写构建命令时同理。
+
 `tsconfig.json` 是便携配置。`tsconfig.check.json` / `tsconfig.build.json` 是
 本机助手（把 `@earendil-works/*` 和 `typebox` 映射到现成安装）——故意 git-ignore。
 
-纯函数（板→摘要渲染、recall 搜索、收编解析、legacy assist 节）由 `test/smoke.mjs`
-断言（32 项）；钩子、checkpoint 注入、压缩交接由真实 pi 会话验证，不在套件里。
+纯函数（板→摘要渲染、recall 搜索、收编解析、压缩倒计时、legacy assist 节）由
+`test/smoke.mjs` 断言（40 项）；钩子、checkpoint 注入、压缩交接由真实 pi 会话验证，
+不在套件里。
 
 ## 局限（诚实版）
 

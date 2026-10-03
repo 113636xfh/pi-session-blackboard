@@ -11,7 +11,8 @@ import { renderSummary, SUMMARY_MIN_ENTRIES } from "../build/summary.js";
 import { formatRecall, searchDigest, searchDocument } from "../build/recall.js";
 import { renderAssistSection } from "../build/compact-assist.js";
 import { commitEntries, parseSummarySections, readBoardFile, renderBoard, seedFromPriorSummary } from "../build/board.js";
-import { mkdtempSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { computePressure, describePressure, fmtTokens, resolveReserveFromSources, PI_DEFAULT_RESERVE_TOKENS, DEFAULTS } from "../build/config.js";
+import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { emptyBoard } from "./helpers.mjs";
@@ -429,6 +430,85 @@ check("seedFromPriorSummary routes a Findings header into the findings section",
 	assert.ok(res.counts.findings === 1, `findings count missing: ${JSON.stringify(res.counts)}`);
 	const md = readFileSync(join(dir, `${sid}.md`), "utf8");
 	assert.ok(md.includes("探针 40s"));
+});
+
+// ── compaction countdown (how far is the trigger?) ─────────────────────────
+// Hermetic cwd: the countdown mirrors THIS project's compaction settings, so
+// the tests pin them in a temp .pi/settings.json instead of reading the real
+// agent settings (which do set reserveTokens on this machine).
+const cfgDir = (compaction) => {
+	const dir = mkdtempSync(join(tmpdir(), "sbb-cfg-"));
+	mkdirSync(join(dir, ".pi"), { recursive: true });
+	writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ compaction }));
+	return dir;
+};
+const RESERVE_16K = 16384;
+
+check("pressure counts down to pi's own trigger line, not to the window", () => {
+	const cwd = cfgDir({ reserveTokens: RESERVE_16K });
+	const p = computePressure({ tokens: 90_000, contextWindow: 128_000 }, cwd, undefined, 32768);
+	assert.ok(p, "pressure must be computable");
+	assert.equal(p.reserveTokens, RESERVE_16K);
+	assert.equal(p.triggerAt, 128_000 - RESERVE_16K);
+	assert.equal(p.remaining, 128_000 - RESERVE_16K - 90_000);
+	assert.equal(p.near, true, "21.6k left IS inside a 32768 warn zone");
+});
+
+check("inside the warn zone the prompt line becomes an instruction", () => {
+	const cwd = cfgDir({ reserveTokens: RESERVE_16K });
+	const p = computePressure({ tokens: 112_000, contextWindow: 128_000 }, cwd, undefined, 32768);
+	assert.equal(p.remaining, 128_000 - RESERVE_16K - 112_000);
+	assert.equal(p.near, true);
+	const line = describePressure(p);
+	assert.ok(line.includes("OVERDUE"), line);
+	assert.ok(line.includes("NEAR COMPACTION"), line);
+});
+
+check("a healthy context still reports the countdown, as guidance not alarm", () => {
+	const cwd = cfgDir({ reserveTokens: RESERVE_16K });
+	const p = computePressure({ tokens: 20_000, contextWindow: 128_000 }, cwd, undefined, 32768);
+	assert.equal(p.near, false, "91.6k left is far from the line");
+	const line = describePressure(p);
+	assert.ok(line.includes("91.6k away"), line);
+	assert.ok(!line.includes("NEAR COMPACTION"), line);
+});
+
+check("unknown token count (right after compaction) yields no line at all", () => {
+	const cwd = cfgDir({ reserveTokens: RESERVE_16K });
+	const p = computePressure({ tokens: null, contextWindow: 128_000 }, cwd, undefined, 32768);
+	assert.equal(p.remaining, null);
+	assert.equal(p.near, false, "unknown must never fake an alarm");
+	assert.equal(describePressure(p), null);
+	assert.equal(describePressure(null), null);
+});
+
+check("no usage / no window -> null, and the warn zone can be switched off", () => {
+	const cwd = cfgDir({ reserveTokens: RESERVE_16K });
+	assert.equal(computePressure(undefined, cwd, undefined, 32768), null);
+	assert.equal(computePressure({ tokens: 1, contextWindow: 0 }, cwd, undefined, 32768), null);
+	const p = computePressure({ tokens: 112_000, contextWindow: 128_000 }, cwd, undefined, 0);
+	assert.equal(p.near, false, "compactionWarnTokens: 0 disables the every-turn nudge");
+});
+
+check("fmtTokens stays short", () => {
+	assert.equal(fmtTokens(999), "999");
+	assert.equal(fmtTokens(91_616), "91.6k");
+	assert.equal(fmtTokens(99_999), "100.0k");
+	assert.equal(fmtTokens(128_000), "128k");
+});
+
+check("reserve resolves model override > ordinary setting > pi default", () => {
+	const user = { reserveTokens: 400000, modelOverrides: { "local/qwen": { reserveTokens: 999 } } };
+	const project = { reserveTokens: 20_000 };
+	assert.equal(resolveReserveFromSources([user, project], "local/qwen"), 999, "model override wins");
+	assert.equal(resolveReserveFromSources([user, project], "other/model"), 20_000, "project wins over user");
+	assert.equal(resolveReserveFromSources([user]), 400_000, "user setting when no project");
+	assert.equal(resolveReserveFromSources([]), PI_DEFAULT_RESERVE_TOKENS, "pi default last");
+	assert.equal(PI_DEFAULT_RESERVE_TOKENS, 16384, "pi's built-in default");
+});
+
+check("the warn zone ships on by default, sized to the local 27B window", () => {
+	assert.equal(DEFAULTS.compactionWarnTokens, 32768);
 });
 
 // ── report ─────────────────────────────────────────────────────────────────

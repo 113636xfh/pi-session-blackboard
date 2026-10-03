@@ -221,6 +221,37 @@ compaction summary can show.
 
 3. If the agent ignores the draft three times in a row, injection stops and a
    warning appears in the TUI (`/bb` still shows everything, `/bb skip` clears).
+   **Near compaction is the exception**: a countdown reminder is a standing
+   nudge, not an ignored draft — it never burns one of those 3 misses.
+
+### The compaction countdown: every turn, once it gets close
+
+Every checkpoint message carries one line stating **how many tokens are left
+until compaction**. The number comes from `ctx.getContextUsage()`, and the
+trigger line is computed the way pi computes it: `contextWindow − reserveTokens`,
+with `reserveTokens` resolved as model override → project setting → user setting
+→ built-in 16384 — the same chain pi's `shouldCompact()` uses.
+
+```
+[context pressure] compaction is 3.3k away — context is at 95.0k of 131k tokens
+(pi compacts above 98.3k = window − reserve 32.8k). NEAR COMPACTION — commit what
+matters from this turn onto the board NOW, even if the draft below looks thin or
+already known: whatever is not on the board when compaction fires is gone.
+```
+
+When the remaining budget drops to `compactionWarnTokens` (default 32768) the
+session is in the **warn zone**, and:
+
+- checkpoints are injected **every turn** (ignoring `checkpointTurns`) — even
+  with an empty draft, because the facts worth keeping are exactly the ones
+  deterministic extraction cannot see;
+- the line switches from planning guidance to an instruction, tagged
+  `NEAR COMPACTION`;
+- the reminder does not consume the "ignored 3×" budget.
+
+Right after a compaction (before the next model response) the token count is
+unknown → **no line at all** rather than a fabricated alarm. Set
+`compactionWarnTokens: 0` to turn the countdown and the every-turn cadence off.
 
 ## The `blackboard` tool
 
@@ -274,6 +305,7 @@ under the key `"session-blackboard"`:
     "maxEntriesPerSection": 40,   // rotation threshold per section
     "maxEntryChars": 300,         // per-entry line cap
     "maxDraftLines": 60,          // draft size cap rendered into the checkpoint
+    "compactionWarnTokens": 32768, // ≤ this many tokens left = near compaction (remind every turn); 0 = off
     "mirrorToSession": true,      // compact digest → session JSONL (sbb-snapshot entries)
     "compaction": "board",        // "board" (the board IS the summary) | "digest" | "off"
     "summaryMaxChars": 6000,      // hard cap for the board rendered as the summary
@@ -293,6 +325,9 @@ under the key `"session-blackboard"`:
   message: zero extra LLM calls. `"immediate"` dispatches a steer message that
   triggers a short review turn right away (small extra call, mostly cached
   prefix) — useful in unattended runs where "next user message" is far away.
+- **`compactionWarnTokens`** (default 32768): this few tokens left counts as
+  "near compaction" — checkpoints switch to every turn and carry the countdown.
+  Set `0` to disable.
 
 ### Legacy: compaction assist (`compactAssist`, off by default)
 
@@ -352,15 +387,23 @@ npm test               # build (tsc -> build/) + node test/smoke.mjs
 npm run docs:render    # SVG -> PNG (resvg, deterministic, no browser)
 ```
 
+> **The `&`-in-path trap** (this repo lives under `D:\01-R&D\…`): npm resolves
+> the `node_modules\.bin` shim to an absolute path containing `&`, cmd.exe splits
+> it as a command separator, and the script dies with
+> `'D:\Project-…\node_modules\.bin\' is not recognized`. So `build`/`typecheck`
+> do **not** call a bare `tsc`; they call
+> `node ./node_modules/typescript/bin/tsc` (a relative path with no `&`).
+> Keep that in mind for hand-written build commands too.
+
 `tsconfig.json` is the portable config. `tsconfig.check.json` /
 `tsconfig.build.json` are machine-local helpers (they map `@earendil-works/*`
 and `typebox` to an existing install so the sources can be checked without
 `npm install`) and are git-ignored on purpose.
 
-The pure functions (board→summary rendering, recall search, adoption parsing,
-the legacy assist section) are asserted by `test/smoke.mjs` (32 checks); the
-hooks, the checkpoint injection, and the compaction hand-back are exercised by
-real pi sessions, not by the suite.
+The pure functions (board→summary rendering, recall search, adoption parsing, the
+compaction countdown, the legacy assist section) are asserted by
+`test/smoke.mjs` (40 checks); the hooks, the checkpoint injection, and the
+compaction hand-back are exercised by real pi sessions, not by the suite.
 
 ## Limitations (honest)
 
