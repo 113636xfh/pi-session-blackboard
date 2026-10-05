@@ -79,25 +79,33 @@ pi install /path/to/pi-session-blackboard   # 用户级；或 pi install -l ... 
 同一台本地 27B（W4A16/PCIe）实测：黑板路径 **0.0s**，原生摘要路径 >3min 未跑完。
 板子是文件，压缩就是文件渲染。
 
-### 收编（adoption）：原生摘要不浪费
+### 手动原生压缩按钮：`/bb compact`
 
-板薄时走了原生流程，模型已经花了调用——那份摘要不该丢。收编把它解析回板：
+一个开关就能让下一次压缩走 **pi 原生摘要**（模型调用），即便当前是 `"compaction": "board"`：
 
-- **`session_start`**：会话从已有 summary 恢复而板是薄的 → 用该 summary 播种
-  薄板（seed）；
-- **`session_compact`**：原生压缩完成后，把新 summary 解析成分节条目 commit 进板，
-  下次压缩就走黑板了；
-- **防自收编环**（三层）：`fromExtension` 守卫（板模式产生的压缩不触发收编）+
-  自有摘要标记（`BOARD_SUMMARY_MARKER`）+ 板不薄检查——板子自己渲染出的摘要
-  永远不会再被解析回自己；
-- 解析规则：**节标题路由**（`## Goal` / `## Constraints & Preferences` /
-  `[Files And Changes]` 都认）+ **内容嗅探优先于标题**（`## Progress` 下含 `ENOENT`
-  的行归 Issues）；丢弃占位符（`[Scope change]`、`[x]`）；每条目 600 字额度
-  （不受 agent 300 字上限约束）；
-- 每节只保留最新 6 条，其余写进单个归档文件 `adopted-<stamp>.md` + 1 行指针
-  （不再逐条生成 206 个碎片文件）。
+1. 命令在 state 里埋一个**一次性**标记（5 分钟 TTL——取消压缩不会留下过期的旁路）；
+2. `session_before_compact` 看到这个标记就**跳过板子接管**，返回 undefined，
+   pi 原生流程原样跑（切点、保留尾部、重试策略都是 pi 的）；
+3. 压完后 `session_compact`（`fromExtension=false`）拿到那份原生摘要，
+   按上面的规则**合并进黑板**（见下）。
 
-端到端实测：14578 字原生 summary → 31 条入板 + 1 个收编归档；8160 字 → 27 条。
+所以这一次会花一次模型调用，但换来的摘要不会丢：它会变成板上的条目。
+想每次都走原生，把配置改成 `"compaction": "off"` 即可。
+
+### 收编（merge）：原生摘要不浪费，进板而不是只在薄板时进板
+
+早期版本只在板**薄**（真实条目 < 3）时收编原生摘要，理由是「不让外来摘要稀释
+已审校的条目」。现在改成**一律合并**：板厚时那份摘要同样可能含板子没有的事实，
+丢掉它正是本扩展要防的丢事实。安全靠结构而不是拒绝：
+
+- **自己生成的摘要永不合并**（`BOARD_SUMMARY_MARKER`）——板模式压缩不会把自己解析回自己；
+- **每节每次合并上限 6 条**（留最新），超出部分进**单个** `adopted-<stamp>.md`；
+- 正常的每节轮转照旧生效（`maxEntriesPerSection`），板子始终有界；
+- **大小写不敏感精确去重**，板上的和归档文件里的行都算「已知」，所以重复合并是 no-op
+  （不会重复写归档文件）；
+- 会话恢复时会把分支里**每一次**压缩的摘要按时间顺序全都合一遍（去重使重跑无副作用）。
+
+手动原生压缩走的就是这条路。
 
 ### 检索：`blackboard_recall`
 
@@ -211,8 +219,9 @@ already known: whatever is not on the board when compaction fires is gone.
 
 | 形式 | 作用 |
 |---|---|
-| `/bb` | 状态（路径、版本、各节计数、距 checkpoint 的回合数、待审草稿）+ 板（截断 80 行） |
+| `/bb` | 状态（路径、版本、各节计数、距 checkpoint 的回合数、待审草稿、**距压缩剩余 token**）+ 板（截断 80 行）+ 子命令提示 |
 | `/bb now` | 立即强制投递待审草稿（或按 `delivery` 随下条消息） |
+| `/bb compact` | **强制下一次走 pi 原生压缩**（模型调用），压完的摘要自动合并进板 |
 | `/bb skip` | 丢弃待审草稿 |
 | `/bb reset` | 确认后删除本会话板 + 状态（归档文件保留） |
 
@@ -224,7 +233,7 @@ already known: whatever is not on the board when compaction fires is gone.
 |---|---|---|
 | `~/.pi/agent/blackboard/<sessionId>.md` | `blackboard` 工具（commit 时） | **板** —— 纯 markdown，分节顺序稳定，每节有上限 |
 | `~/.pi/agent/blackboard/archive/<sessionId>/board-<ts>.md` | `blackboard` 工具（溢出轮转） | 每节溢出 —— append-only，每次轮转一个文件 |
-| `~/.pi/agent/blackboard/archive/<sessionId>/adopted-<stamp>.md` | 收编（session_start / session_compact） | 收编时超出每节 6 条额度的旧条目 —— 单个文件 + 板上 1 行指针 |
+| `~/.pi/agent/blackboard/archive/<sessionId>/adopted-<stamp>.md` | 合并（原生摘要） | 每次合并超出每节 6 条额度的旧条目 —— 单个文件 + 板上 1 行指针 |
 | `~/.pi/agent/blackboard/state/<sessionId>.json` | 扩展（确定性） | 抽取游标、待审草稿、计数器 |
 | `~/.pi/agent/blackboard/debug/<sessionId>.ndjson` | 扩展，仅 `"debugLog": true` | 调试事件日志 |
 | 会话 JSONL（`sbb-snapshot` 条目） | 扩展（可选镜像） | 板状态紧凑 digest —— `blackboard_recall` 可搜 |
@@ -325,7 +334,7 @@ npm run docs:render  # SVG -> PNG（resvg，确定性，无浏览器）
 本机助手（把 `@earendil-works/*` 和 `typebox` 映射到现成安装）——故意 git-ignore。
 
 纯函数（板→摘要渲染、recall 搜索、收编解析、压缩倒计时、legacy assist 节）由
-`test/smoke.mjs` 断言（40 项）；钩子、checkpoint 注入、压缩交接由真实 pi 会话验证，
+`test/smoke.mjs` 断言（42 项）；钩子、checkpoint 注入、压缩交接由真实 pi 会话验证，
 不在套件里。
 
 ## 局限（诚实版）

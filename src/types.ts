@@ -67,10 +67,18 @@ export type SbbState = {
 	pendingCheckpoint: boolean;
 	/** how many times the current draft was injected unprocessed. */
 	draftInjectCount: number;
-	/** last time a foreign (native) compaction summary was adopted into the board. */
+	/** last time a native compaction summary was merged into the board. */
 	lastAdoption?: { source: "session_start" | "native-compaction"; at: string; total: number };
-	/** the one-shot scan for a pre-existing compaction summary has already run. */
+	/** the one-shot scan for pre-existing compaction summaries has already run. */
 	priorSummaryChecked?: boolean;
+	/**
+	 * One-shot: the next compaction must run pi's NATIVE summarization even in
+	 * `"board"` mode (set by `/bb compact`). The result is merged back into the
+	 * board by the session_compact hook, so the bypass costs nothing.
+	 */
+	forceNativeOnce?: boolean;
+	/** when the one-shot native bypass was armed (5-minute TTL). */
+	forceNativeOnceAt?: number;
 };
 
 /** Loose structural type for pi session branch entries (avoids pinning pi internals). */

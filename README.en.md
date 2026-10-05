@@ -105,32 +105,43 @@ Measured on the same local 27B (W4A16/PCIe): board path **0.0s**; native
 summarization path did not finish (>3min). The board is a file — compaction is
 a file render.
 
-### Adoption: the native summary is not wasted
+### The manual native-compaction button: `/bb compact`
 
-When the board is thin, the native flow ran — the model already paid its call,
-and that summary should not be thrown away. Adoption parses it back into the
-board:
+One switch makes the *next* compaction run **pi's own summarization** (the model
+call), even while `"compaction": "board"` is on:
 
-- **`session_start`**: the session restores from an existing summary while the
-  board is thin → seed the board from that summary;
-- **`session_compact`**: after a native compaction, the new summary is parsed
-  into per-section entries and committed to the board — the *next* compaction
-  then goes through the board;
-- **self-adoption loop guard** (three layers): the `fromExtension` guard
-  (compactions produced by board mode never trigger adoption) + the
-  own-summary marker (`BOARD_SUMMARY_MARKER`) + a board-not-thin check — the
-  board's own render can never be parsed back into itself;
-- parsing rules: **section-title routing** (`## Goal` /
-  `## Constraints & Preferences` / `[Files And Changes]` all recognized) +
-  **content sniffing over titles** (a line containing `ENOENT` under
-  `## Progress` lands in Issues); placeholders are dropped (`[Scope change]`,
-  `[x]`); per-entry quota is 600 chars (not bound by the agent's 300-char cap);
-- each section keeps the latest 6 adopted entries; the rest goes into a single
-  archive file `adopted-<stamp>.md` plus one pointer line (no more 206
-  per-entry fragment files).
+1. the command arms a **one-shot** flag in the state file (5-minute TTL — a
+   cancelled compaction cannot leave a stale bypass armed);
+2. `session_before_compact` sees the flag, **skips the board takeover** and
+   returns undefined, so pi's native flow runs untouched (its cut point, retained
+   tail and retry policy);
+3. afterwards `session_compact` (`fromExtension=false`) has that native summary in
+   hand and **merges it into the board** (see below).
 
-End-to-end measured: a 14578-char native summary → 31 entries adopted + 1
-adoption archive; 8160 chars → 27 entries.
+So this press costs one model call — and the summary it buys is not wasted: it
+becomes board entries. To use native every time, set `"compaction": "off"`.
+
+### Merge: a native summary is never wasted
+
+An earlier version only took a native summary in when the board was *thin*
+(fewer than 3 real entries), on the grounds that a foreign summary must not
+dilute curated entries. Now it **always merges**: a summary the model just wrote
+can carry facts the board does not have, and dropping it is exactly the loss
+this extension exists to prevent. Safety comes from structure, not refusal:
+
+- **our own board summary is never merged back** (`BOARD_SUMMARY_MARKER`), so a
+  board-mode compaction can never parse the board into itself;
+- **6 entries per section per merge** (newest kept); the rest go into a single
+  `adopted-<stamp>.md`;
+- the normal per-section rotation still applies (`maxEntriesPerSection`), so the
+  board stays bounded;
+- **case-insensitive exact dedupe**, counting lines already in the archive files
+  as known too — so re-merging the same summary is a no-op and writes no new
+  archive file;
+- on session resume, **every** compaction summary in the branch is merged, in
+  order (dedupe makes re-runs side-effect free).
+
+That is the same path the manual native compaction takes.
 
 ### Retrieval: `blackboard_recall`
 
@@ -267,8 +278,9 @@ unknown → **no line at all** rather than a fabricated alarm. Set
 
 | form | what it does |
 |---|---|
-| `/bb` | status (path, version, per-section counts, turns since checkpoint, pending draft) + board (truncated to 80 lines) |
+| `/bb` | status (path, version, per-section counts, turns since checkpoint, pending draft, **tokens left until compaction**) + board (truncated to 80 lines) + subcommand hints |
 | `/bb now` | force the pending-draft checkpoint immediately (or with your next message, per `delivery`) |
+| `/bb compact` | **force the next compaction to be pi's native one** (model call); its summary is merged into the board |
 | `/bb skip` | discard the pending draft |
 | `/bb reset` | confirm, then delete this session's board + state (archive files are kept) |
 
@@ -281,7 +293,7 @@ the `blackboard` tool, and only when the agent commits:
 |---|---|---|
 | `~/.pi/agent/blackboard/<sessionId>.md` | the `blackboard` tool (on the agent's commit) | **the board** — plain markdown, stable section order, capped per section |
 | `~/.pi/agent/blackboard/archive/<sessionId>/board-<ts>.md` | the `blackboard` tool (deterministic overflow rotation) | per-section overflow — append-only, one file per rotation |
-| `~/.pi/agent/blackboard/archive/<sessionId>/adopted-<stamp>.md` | adoption (`session_start` / `session_compact`) | adopted entries beyond the 6-per-section quota — one file + one pointer line on the board |
+| `~/.pi/agent/blackboard/archive/<sessionId>/adopted-<stamp>.md` | merge (native summary) | entries beyond the 6-per-section quota of one merge — one file + one pointer line on the board |
 | `~/.pi/agent/blackboard/state/<sessionId>.json` | the extension (deterministic) | extraction cursor, pending draft, counters |
 | `~/.pi/agent/blackboard/debug/<sessionId>.ndjson` | the extension, only when `"debugLog": true` | event log for debugging |
 | the session's own JSONL (`sbb-snapshot` entries) | the extension (optional mirroring) | compact digests of board state — searchable by `blackboard_recall` |
@@ -402,7 +414,7 @@ and `typebox` to an existing install so the sources can be checked without
 
 The pure functions (board→summary rendering, recall search, adoption parsing, the
 compaction countdown, the legacy assist section) are asserted by
-`test/smoke.mjs` (40 checks); the hooks, the checkpoint injection, and the
+`test/smoke.mjs` (42 checks); the hooks, the checkpoint injection, and the
 compaction hand-back are exercised by real pi sessions, not by the suite.
 
 ## Limitations (honest)

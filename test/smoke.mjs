@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { renderSummary, SUMMARY_MIN_ENTRIES } from "../build/summary.js";
 import { formatRecall, searchDigest, searchDocument } from "../build/recall.js";
 import { renderAssistSection } from "../build/compact-assist.js";
-import { commitEntries, parseSummarySections, readBoardFile, renderBoard, seedFromPriorSummary } from "../build/board.js";
+import { commitEntries, mergeSummaryIntoBoard, parseSummarySections, readBoardFile, renderBoard } from "../build/board.js";
 import { computePressure, describePressure, fmtTokens, resolveReserveFromSources, PI_DEFAULT_RESERVE_TOKENS, DEFAULTS } from "../build/config.js";
 import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -297,56 +297,67 @@ check("content beats the header: an error line under Progress becomes an Issue",
 	assert.equal(parsed[0].section, "issues");
 });
 
-check("seeding fills an empty board, and refuses a board that already has content", () => {
+check("a native summary merges into an EMPTY board", () => {
 	const dir = tmpBoard();
-	const sid = "seed-1";
-	const first = seedFromPriorSummary(dir, sid, CFG, NATIVE_SUMMARY);
-	assert.ok(first.seeded, "an empty board must accept the summary");
-	assert.ok(first.total >= 8, `expected the bullets to land, got ${first.total}`);
+	const sid = "merge-1";
+	const first = mergeSummaryIntoBoard(dir, sid, CFG, NATIVE_SUMMARY);
+	assert.ok(first.merged, "an empty board must accept the summary");
+	assert.ok(first.added >= 8, `expected the bullets to land, got ${first.added}`);
 	assert.ok(first.counts.goal >= 2 && first.counts.issues >= 1, `bad routing: ${JSON.stringify(first.counts)}`);
+});
 
-	const again = seedFromPriorSummary(dir, sid, CFG, NATIVE_SUMMARY);
-	assert.equal(again.seeded, false);
-	assert.equal(again.reason, "board-not-thin", "curated content must never be re-diluted");
-
-	const curated = tmpBoard();
-	commitEntries(curated, "seed-2", CFG, [
-		{ section: "goal", text: "a" },
-		{ section: "goal", text: "b" },
-		{ section: "goal", text: "c" },
+check("a native summary ALSO merges into a full board: curated entries stay, no duplicates", () => {
+	const dir = tmpBoard();
+	const sid = "merge-2";
+	commitEntries(dir, sid, CFG, [
+		{ section: "goal", text: "curated goal that predates the summary" },
+		{ section: "files", text: "modified src/keep.ts (keep)" },
 	]);
-	const blocked = seedFromPriorSummary(curated, "seed-2", CFG, NATIVE_SUMMARY);
-	assert.equal(blocked.seeded, false);
-	assert.equal(blocked.reason, "board-not-thin");
+	const res = mergeSummaryIntoBoard(dir, sid, CFG, NATIVE_SUMMARY);
+	assert.ok(res.merged, "a dense board must still take the summary in");
+	assert.ok(res.added > 0, "new facts must land");
+	const b = readBoardFile(dir, sid);
+	assert.ok(
+		b.sections.goal.some((e) => e.text === "curated goal that predates the summary"),
+		"curated entry must survive the merge",
+	);
+	assert.ok(b.sections.files.some((e) => e.text.includes("keep.ts")), "curated file entry must survive");
+	// Re-merging is a no-op: dedupe is case-insensitive and exact.
+	const again = mergeSummaryIntoBoard(dir, sid, CFG, NATIVE_SUMMARY);
+	assert.equal(again.added, 0, `second merge must add nothing, added ${again.added}`);
+	assert.ok(again.deduped > 0, "duplicate lines must be reported as deduped");
+	mergeSummaryIntoBoard(dir, sid, CFG, NATIVE_SUMMARY.toUpperCase());
+	const goals = readBoardFile(dir, sid).sections.goal.map((e) => e.text.toLowerCase());
+	assert.equal(goals.length, new Set(goals).size, "case-folded text must not slip past the dedupe");
 });
 
-check("our own board summary is never adopted back in", () => {
+check("our own board summary is never merged back in", () => {
 	const dir = tmpBoard();
-	const sid = "seed-3";
+	const sid = "merge-3";
 	const ours = ["# Session context checkpoint", "", "## Goal", "- something we wrote ourselves"].join(String.fromCharCode(10));
-	const res = seedFromPriorSummary(dir, sid, CFG, ours);
-	assert.equal(res.seeded, false);
+	const res = mergeSummaryIntoBoard(dir, sid, CFG, ours);
+	assert.equal(res.merged, false);
 	assert.equal(res.reason, "own-summary");
-	assert.equal(seedFromPriorSummary(dir, sid, CFG, "   ").reason, "empty-summary");
+	assert.equal(mergeSummaryIntoBoard(dir, sid, CFG, "   ").reason, "empty-summary");
 });
 
-check("a seeded board can immediately render as a summary", () => {
+check("a merged board can immediately render as a summary", () => {
 	const dir = tmpBoard();
-	const sid = "seed-4";
-	seedFromPriorSummary(dir, sid, CFG, NATIVE_SUMMARY);
+	const sid = "merge-4";
+	mergeSummaryIntoBoard(dir, sid, CFG, NATIVE_SUMMARY);
 	const out = renderSummary(readBoardFile(dir, sid), { recallTool: "blackboard_recall" });
-	assert.ok(out, "a seeded board must clear the thin-board floor");
-	assert.ok(out.includes("ENOENT") && out.includes("FTS5"), "seeded facts reach the summary");
+	assert.ok(out, "a merged board must clear the thin-board floor");
+	assert.ok(out.includes("ENOENT") && out.includes("FTS5"), "merged facts reach the summary");
 });
 
 
-check("adoption trims overflow itself: newest kept, rest in ONE archive file", () => {
+check("a merge trims overflow itself: newest kept, rest in ONE archive file", () => {
 	const dir = tmpBoard();
-	const sid = "seed-5";
+	const sid = "merge-5";
 	const many = ["## Decisions", ...Array.from({ length: 40 }, (_, i) => `- decision number ${i}`)].join(String.fromCharCode(10));
-	const res = seedFromPriorSummary(dir, sid, CFG, many);
-	assert.ok(res.seeded);
-	assert.equal(res.total, 6, "only the newest 6 stay on the board");
+	const res = mergeSummaryIntoBoard(dir, sid, CFG, many);
+	assert.ok(res.merged);
+	assert.equal(res.added, 6, "only the newest 6 stay on the board");
 	assert.equal(res.dropped, 34, "the rest are archived");
 	assert.equal(res.archived.length, 1, "exactly one archive file, not 34");
 	const files = readdirSync(join(dir, "archive", sid));
@@ -359,14 +370,29 @@ check("adoption trims overflow itself: newest kept, rest in ONE archive file", (
 	assert.ok(md.includes("decision number 39"), "newest decision is on the board");
 });
 
-check("adopted entries are not cut at the agent cap", () => {
+check("re-merging the same summary is a no-op even after its overflow was archived", () => {
 	const dir = tmpBoard();
-	const sid = "seed-6";
+	const sid = "merge-idem";
+	const many = ["## Findings", ...Array.from({ length: 10 }, (_, i) => `- finding ${i} with a measured result`)].join(String.fromCharCode(10));
+	const first = mergeSummaryIntoBoard(dir, sid, CFG, many);
+	assert.equal(first.added, 6, "newest 6 stay");
+	assert.equal(first.dropped, 4, "the other 4 are archived");
+	assert.equal(first.archived.length, 1, "one archive file");
+	const second = mergeSummaryIntoBoard(dir, sid, CFG, many);
+	assert.equal(second.added, 0, `archived lines must count as known, added ${second.added}`);
+	assert.equal(second.deduped, 10, "all ten bullets reported as already known");
+	assert.equal(second.archived.length, 0, "a no-op merge writes no archive file");
+	assert.equal(readdirSync(join(dir, "archive", sid)).length, 1, "still exactly one archive file");
+});
+
+check("merged entries are not cut at the agent cap", () => {
+	const dir = tmpBoard();
+	const sid = "merge-6";
 	const NL = String.fromCharCode(10);
 	const long = ["## Files And Changes", `- modified src/engine.ts because ${"x".repeat(450)}`].join(NL);
-	seedFromPriorSummary(dir, sid, CFG, long);
+	mergeSummaryIntoBoard(dir, sid, CFG, long);
 	const md = readFileSync(join(dir, `${sid}.md`), "utf8");
-	assert.ok(md.includes("x".repeat(450)), "a 450-char rationale must survive adoption");
+	assert.ok(md.includes("x".repeat(450)), "a 450-char rationale must survive the merge");
 });
 
 // ── findings: first-class key findings from exploration/experiments ──────
@@ -420,13 +446,13 @@ check("a findings entry renders in the board and the summary", () => {
 	assert.ok(out && out.includes("## Key Findings") && out.includes("实测 compact"), "summary carries the finding");
 });
 
-check("seedFromPriorSummary routes a Findings header into the findings section", () => {
+check("merge routes a Findings header into the findings section", () => {
 	const dir = tmpBoard();
-	const sid = "seed-findings";
-	const res = seedFromPriorSummary(dir, sid, CFG,
+	const sid = "merge-findings";
+	const res = mergeSummaryIntoBoard(dir, sid, CFG,
 		"## Goal" + String.fromCharCode(10) + "- make compaction lossless" + String.fromCharCode(10) +
 		"## Findings" + String.fromCharCode(10) + "- 实测：探针 40s 杀进程导致摘要没跑完");
-	assert.ok(res.seeded);
+	assert.ok(res.merged);
 	assert.ok(res.counts.findings === 1, `findings count missing: ${JSON.stringify(res.counts)}`);
 	const md = readFileSync(join(dir, `${sid}.md`), "utf8");
 	assert.ok(md.includes("探针 40s"));

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Board, BoardEntry, Section } from "./types.js";
 import { SECTION_HEADERS, SECTIONS } from "./types.js";
@@ -187,9 +187,54 @@ export function parseSummarySections(summary: string): { section: Section; text:
 	return out;
 }
 
-export type SeedResult =
-	| { seeded: false; reason: "own-summary" | "empty-summary" | "nothing-parseable" | "board-not-thin" }
-	| { seeded: true; total: number; counts: Record<string, number>; archived: string[]; dropped: number };
+/**
+ * Lines already living in this session's archive files, keyed like the board's
+ * dedupe key. A merge must treat them as known: otherwise the entries a PREVIOUS
+ * merge archived (its own overflow) look fresh again on the next pass and climb
+ * back onto the board.
+ */
+function archivedLineKeys(boardDir: string, sessionId: string): Set<string> {
+	const out = new Set<string>();
+	const dir = archiveDir(boardDir, sessionId);
+	let files: string[];
+	try {
+		files = readdirSync(dir).filter((f) => f.endsWith(".md"));
+	} catch {
+		return out;
+	}
+	for (const f of files) {
+		let text: string;
+		try {
+			text = readFileSync(join(dir, f), "utf-8");
+		} catch {
+			continue;
+		}
+		let section = "";
+		for (const line of text.split(/\r?\n/)) {
+			const h = /^##\s*From:\s*(.+?)\s*$/.exec(line);
+			if (h) {
+				section = routeSummaryHeader(h[1]) ?? "";
+				continue;
+			}
+			const m = /^-\s*\[[^\]]*\]\s*(.+)$/.exec(line);
+			if (m && section) out.add(`${section} ${m[1].trim().toLowerCase()}`);
+		}
+	}
+	return out;
+}
+
+export type MergeResult =
+	| { merged: false; reason: "own-summary" | "empty-summary" | "nothing-parseable" }
+	| {
+			merged: true;
+			/** entries that were new to the board */
+			added: number;
+			/** lines already present (case-insensitive) — nothing was duplicated */
+			deduped: number;
+			counts: Record<string, number>;
+			archived: string[];
+			dropped: number;
+	  };
 
 /** Caps when adopting a foreign summary: keep the board readable as a summary. */
 const SEED_MAX_PER_SECTION = 6;
@@ -197,35 +242,54 @@ const SEED_MAX_PER_SECTION = 6;
 const SEED_MAX_ENTRY_CHARS = 600;
 
 /**
- * Adopt a native compaction summary into the board.
+ * Merge a native compaction summary INTO the board.
  *
- * Refuses when the board already carries real content (never merge into curated
- * entries) or when the summary is one we produced ourselves. Otherwise the
- * parsed entries are committed through the normal path, so timestamps, dedupe,
- * truncation and overflow rotation all apply.
+ * The board does not have to be thin: a summary the model just wrote carries
+ * whatever the board missed, and losing it is exactly the loss this extension
+ * exists to prevent. Safety comes from structure, not from refusing:
+ *   - our own board summary is refused (BOARD_SUMMARY_MARKER), so a board-mode
+ *     compaction can never be parsed back into the board;
+ *   - per-merge section cap (newest SEED_MAX_PER_SECTION kept, the rest archived
+ *     into ONE adopted-<ts>.md), so one summary cannot flood the board;
+ *   - the normal per-section rotation still applies, so the board stays bounded;
+ *   - exact (case-insensitive) dedupe, so re-merging the same summary is a no-op.
  */
-export function seedFromPriorSummary(
+export function mergeSummaryIntoBoard(
 	boardDir: string,
 	sessionId: string,
 	cfg: { maxEntriesPerSection: number; maxEntryChars: number },
 	summary: string,
-): SeedResult {
+): MergeResult {
 	const text = String(summary ?? "");
-	if (!text.trim()) return { seeded: false, reason: "empty-summary" };
-	if (text.includes(BOARD_SUMMARY_MARKER)) return { seeded: false, reason: "own-summary" };
-
-	const existing = readBoardFile(boardDir, sessionId);
-	if (countReal(existing) >= BOARD_SUMMARY_FLOOR) return { seeded: false, reason: "board-not-thin" };
+	if (!text.trim()) return { merged: false, reason: "empty-summary" };
+	if (text.includes(BOARD_SUMMARY_MARKER)) return { merged: false, reason: "own-summary" };
 
 	const parsed = parseSummarySections(text);
-	if (parsed.length === 0) return { seeded: false, reason: "nothing-parseable" };
+	if (parsed.length === 0) return { merged: false, reason: "nothing-parseable" };
+
+	// Drop what the board already knows BEFORE trimming. Without this, re-merging
+	// the same summary would pass the per-section cap again, "drop" lines it had
+	// already archived, and write a fresh adopted-<ts>.md on every single pass.
+	const board = readBoardFile(boardDir, sessionId);
+	const known = new Set<string>();
+	for (const s of SECTIONS) for (const e of board.sections[s]) known.add(`${s} ${e.text.toLowerCase()}`);
+	for (const k of archivedLineKeys(boardDir, sessionId)) known.add(k);
+	const fresh = parsed.filter((p) => !known.has(`${p.section} ${p.text.toLowerCase()}`));
+	if (fresh.length === 0) {
+		const counts: Record<string, number> = {};
+		for (const s of SECTIONS) {
+			const n = board.sections[s].filter((e) => !e.text.startsWith("(archived)")).length;
+			if (n > 0) counts[s] = n;
+		}
+		return { merged: true, added: 0, deduped: parsed.length, counts, archived: [], dropped: 0 };
+	}
 
 	// Adopted lines come from a summary we did not write, so they get room: a hard
 	// cut mid-rationale would lose the part that matters. Overflow is trimmed HERE
 	// (newest kept per section) rather than by the per-commit rotation, so the whole
-	// adoption produces exactly one archive file.
+	// merge produces exactly one archive file.
 	const grouped = new Map<Section, string[]>();
-	for (const p of parsed) {
+	for (const p of fresh) {
 		const arr = grouped.get(p.section) ?? [];
 		arr.push(p.text);
 		grouped.set(p.section, arr);
@@ -242,14 +306,21 @@ export function seedFromPriorSummary(
 	}
 
 	const archivedRel = writeAdoptionArchive(boardDir, sessionId, dropped);
-	const res = commitEntries(boardDir, sessionId, { maxEntriesPerSection: 999, maxEntryChars: SEED_MAX_ENTRY_CHARS }, keep);
+	const res = commitEntries(
+		boardDir,
+		sessionId,
+		{ maxEntriesPerSection: cfg.maxEntriesPerSection, maxEntryChars: SEED_MAX_ENTRY_CHARS },
+		keep,
+	);
+	const archived = [...res.archivedFiles];
 	if (archivedRel) {
 		const board = res.board;
 		board.sections.archived.push({
 			ts: nowLocal(),
-			text: `(archived) ${dropped.length} entries from the prior compaction summary → ${archivedRel}`,
+			text: `(archived) ${dropped.length} entries from the compaction summary → ${archivedRel}`,
 		});
 		writeBoard(boardDir, sessionId, board);
+		archived.push(archivedRel);
 	}
 
 	const counts: Record<string, number> = {};
@@ -258,10 +329,11 @@ export function seedFromPriorSummary(
 		if (n > 0) counts[s] = n;
 	}
 	return {
-		seeded: true,
-		total: res.committed,
+		merged: true,
+		added: res.committed,
+		deduped: res.deduped,
 		counts,
-		archived: archivedRel ? [archivedRel] : [],
+		archived,
 		dropped: dropped.length,
 	};
 }

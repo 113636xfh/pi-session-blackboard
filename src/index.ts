@@ -37,7 +37,7 @@ import {
 } from "./recall.js";
 import { renderSummary } from "./summary.js";
 import type { ContextPressure, SbbConfig } from "./config.js";
-import { computePressure, describePressure, loadConfig } from "./config.js";
+import { computePressure, describePressure, fmtTokens, loadConfig } from "./config.js";
 import { archiveDir, boardPath, debugPath, safeSid } from "./paths.js";
 import { defaultState, loadState, saveState } from "./state.js";
 import {
@@ -49,7 +49,7 @@ import {
 	readBoardFile,
 	renderBoard,
 	resetAll,
-	seedFromPriorSummary,
+	mergeSummaryIntoBoard,
 	writeBoard,
 } from "./board.js";
 import { extractAll, normalizeBranch } from "./extract.js";
@@ -67,6 +67,9 @@ import {
 type AnyCtx = any;
 
 const COMMIT_SECTIONS: Section[] = SECTIONS.filter((s) => s !== "archived");
+
+/** How long `/bb compact` keeps the native bypass armed before it expires. */
+const FORCE_NATIVE_TTL_MS = 5 * 60 * 1000;
 
 export default function sessionBlackboard(pi: ExtensionAPI) {
 	const sessions = new Map<string, { cfg: SbbConfig; sessionId: string; cwd: string }>();
@@ -143,11 +146,12 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 	//  - `session_start`: the extension was enabled mid-session, so pi has
 	//    already summarised the earlier history into a compaction entry;
 	//  - `session_compact`: pi just summarised natively because the board was
-	//    too thin (or unreadable) — that text is the only record left of the
-	//    replaced messages.
-	// Either way the entries are adopted into the board, so the next compaction
-	// has something to work from. Only ever fills a THIN board: curated entries
-	// are never merged with, or diluted by, a foreign summary.
+	//    too thin (or unreadable), or because the user asked for a native
+	//    compaction — that text is the only record left of the replaced messages.
+	// Either way the entries are MERGED into the board (deduped, capped per
+	// section, overflow archived), so the next compaction has something to work
+	// from. Curated entries are never removed by a merge; our own board summary
+	// is never merged back in.
 
 	const adoptSummaryText = (
 		s: { cfg: SbbConfig; sessionId: string },
@@ -156,32 +160,45 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 		reason: "session_start" | "native-compaction",
 	): void => {
 		if (!s.cfg.seedFromPriorSummary) return;
-		const res = seedFromPriorSummary(s.cfg.boardDir, s.sessionId, s.cfg, summary);
-		if (!res.seeded) {
-			debug(s, { event: "summary_not_adopted", reason: res.reason, trigger: reason });
+		const res = mergeSummaryIntoBoard(s.cfg.boardDir, s.sessionId, s.cfg, summary);
+		if (!res.merged) {
+			debug(s, { event: "summary_not_merged", reason: res.reason, trigger: reason });
 			return;
 		}
-		mirror(s, readBoardFile(s.cfg.boardDir, s.sessionId), `adopted:${reason}`);
-		debug(s, { event: "summary_adopted", trigger: reason, total: res.total, counts: res.counts, archived: res.archived.length });
+		mirror(s, readBoardFile(s.cfg.boardDir, s.sessionId), `merged:${reason}`);
+		debug(s, {
+			event: "summary_merged",
+			trigger: reason,
+			added: res.added,
+			deduped: res.deduped,
+			counts: res.counts,
+			archived: res.archived.length,
+		});
 		const st = loadState(s.cfg.boardDir, s.sessionId);
 		st.boardVersion += 1;
-		st.lastAdoption = { source: reason, at: new Date().toISOString(), total: res.total };
+		st.lastAdoption = { source: reason, at: new Date().toISOString(), total: res.added };
 		saveState(s.cfg.boardDir, s.sessionId, st);
 		const detail = Object.entries(res.counts)
 			.map(([k, n]) => `${k}:${n}`)
 			.join(" ");
 		ctx?.ui?.notify?.(
-			`session-blackboard adopted the previous compaction summary — ${res.total} entries (${detail}). Review them at the next checkpoint.`,
+			res.added > 0
+				? `session-blackboard merged a native compaction summary — ${res.added} new entries (${detail})${res.deduped ? `, ${res.deduped} already known` : ""}.`
+				: `session-blackboard merged a native compaction summary — nothing new (${res.deduped} lines already on the board).`,
 			"info",
 		);
 	};
 
 	/**
-	 * Adopt a prior native summary once per session, on whichever hook fires first.
+	 * Adopt prior native summaries once per session, on whichever hook fires first.
 	 *
 	 * `session_start` is not guaranteed to run (measured: an RPC pi process never
 	 * fires it), so the same check also runs from the first processed turn and is
 	 * guarded by a state flag rather than by which event showed up.
+	 *
+	 * EVERY compaction in the branch is merged, oldest first, so a long session
+	 * that compacted several times does not lose the older summaries' facts.
+	 * Merging is idempotent (case-insensitive dedupe), so re-running is a no-op.
 	 */
 	const maybeAdoptPriorSummary = (s: { cfg: SbbConfig; sessionId: string }, ctx: AnyCtx): void => {
 		if (!s.cfg.seedFromPriorSummary) return;
@@ -195,15 +212,13 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 	const adoptPriorSummary = (s: { cfg: SbbConfig; sessionId: string }, ctx: AnyCtx, reason: "session_start"): void => {
 		try {
 			const entries = (ctx?.sessionManager?.getEntries?.() ?? []) as Array<Record<string, unknown>>;
-			for (let i = entries.length - 1; i >= 0; i--) {
-				const e = entries[i];
+			const summaries: string[] = [];
+			for (const e of entries) {
 				if (e?.type !== "compaction") continue;
-				const summary = typeof (e as { summary?: unknown }).summary === "string" ? ((e as { summary: string }).summary) : "";
-				if (summary.trim()) {
-					adoptSummaryText(s, ctx, summary, reason);
-					return;
-				}
+				const summary = typeof (e as { summary?: unknown }).summary === "string" ? (e as { summary: string }).summary : "";
+				if (summary.trim()) summaries.push(summary);
 			}
+			for (const summary of summaries) adoptSummaryText(s, ctx, summary, reason);
 		} catch {
 			/* no session manager / unreadable session */
 		}
@@ -542,6 +557,26 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 		// Returning it here skips pi's summarization call entirely; a thin
 		// board returns null and the native flow below runs untouched.
 		if (s.cfg.compaction === "board") {
+			// A one-shot native request (from `/bb compact`): the user wants pi's
+			// own summarization for this compaction. The summary it produces is
+			// merged back into the board by the session_compact hook below, so
+			// nothing is lost by skipping the board this once.
+			const forced = loadState(s.cfg.boardDir, s.sessionId);
+			// Armed for 5 minutes only: a cancelled compaction must not leave a
+			// native-bypass sitting in the state file for the rest of the session.
+			const age = typeof forced.forceNativeOnceAt === "number" ? Date.now() - forced.forceNativeOnceAt : Infinity;
+			if (forced.forceNativeOnce && age <= FORCE_NATIVE_TTL_MS) {
+				forced.forceNativeOnce = false;
+				forced.forceNativeOnceAt = undefined;
+				saveState(s.cfg.boardDir, s.sessionId, forced);
+				debug(s, { event: "board_summary_bypassed", reason: e.reason, why: "manual-native" });
+				return; // -> untouched native flow
+			}
+			if (forced.forceNativeOnce) {
+				forced.forceNativeOnce = false;
+				forced.forceNativeOnceAt = undefined;
+				saveState(s.cfg.boardDir, s.sessionId, forced);
+			}
 			try {
 				const board = readBoardFile(s.cfg.boardDir, s.sessionId);
 				const bp = boardPath(s.cfg.boardDir, s.sessionId);
@@ -847,7 +882,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 
 	pi.registerCommand("bb", {
 		description:
-			"Session blackboard: no args = status+board | now = force checkpoint on next turn | skip = discard pending draft | reset = wipe board+state (archive kept)",
+			"Session blackboard: no args = status+board | now = force checkpoint on next turn | compact = force NATIVE compaction (its summary is merged into the board) | skip = discard pending draft | reset = wipe board+state (archive kept)",
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		handler: async (args: string, ctx: AnyCtx) => {
 			const s = getSession(ctx);
@@ -864,6 +899,33 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 					if (ok) {
 						resetAll(dir, s.sessionId);
 						ui?.notify?.("Blackboard reset.", "info");
+					}
+					return;
+				}
+				if (cmd === "compact") {
+					// The manual "native compaction" button. Whatever pi's own
+					// summarization writes afterwards is merged back into the board
+					// by the session_compact hook, so this costs a model call and
+					// still leaves the board denser than before.
+					st.forceNativeOnce = true;
+					st.forceNativeOnceAt = Date.now();
+					saveState(dir, s.sessionId, st);
+					try {
+						ctx?.compact?.({
+							onComplete: () => {
+								ui?.notify?.("Native compaction done — its summary was merged into the blackboard.", "info");
+							},
+							onError: (err: Error) => {
+								st.forceNativeOnce = false;
+								saveState(dir, s.sessionId, st);
+								ui?.notify?.(`Native compaction failed: ${err.message}`, "error");
+							},
+						});
+						ui?.notify?.("Running pi's native compaction…", "info");
+					} catch (err) {
+						st.forceNativeOnce = false;
+						saveState(dir, s.sessionId, st);
+						ui?.notify?.(`Could not trigger compaction: ${err instanceof Error ? err.message : String(err)}`, "error");
 					}
 					return;
 				}
@@ -904,11 +966,15 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 
 				// default: status + board (truncated)
 				const board = readBoardFile(dir, s.sessionId);
+				const pr = pressureOf(s, ctx);
 				const lines: string[] = [
 					`blackboard: ${boardPath(dir, s.sessionId)}`,
 					`v${st.boardVersion} | updated: ${board.header.updated ?? "never"} | entries: ${countAll(board)} | turns since checkpoint: ${st.turnsSinceCheckpoint} | pending draft: ${
 						st.pendingDraft ? `${countDraftLines(st.pendingDraft.sections)} lines` : "none"
 					}`,
+					`compaction: ${s.cfg.compaction}${pr && pr.remaining !== null ? ` | ${fmtTokens(pr.remaining)} tokens left until pi's native trigger` : ""}`,
+					"",
+					"subcommands: /bb now (checkpoint on next turn) | /bb compact (force NATIVE compaction; its summary merges into this board) | /bb skip | /bb reset",
 					"",
 				];
 				const rendered = renderBoard(board).split("\n");
