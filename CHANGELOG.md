@@ -26,7 +26,12 @@ All notable changes to this project are documented here.
   Node 20 and 22.
 
 ### Changed
-- **`## Archived` pointer lines are capped at 5 per section** (`MAX_POINTER_LINES`).
+- **CI matrix is Node 22 + 24, not 20.** On Node 20 the smoke suite dies with
+  `SyntaxError: The requested module 'node:fs' does not provide an export named
+  'globSync'` — that import lives in pi's own package
+  (`@earendil-works/pi-coding-agent/dist/core/package-manager.js`), so the
+  dependency needs Node ≥ 22. `engines.node: ">=22"` added and documented.
+- **Pointer lines are capped at 5 per section** (`MAX_POINTER_LINES`).
   Measured before the cap: 60 commits with `maxEntriesPerSection: 5` left 55
   pointer lines and 4.7 KB in a single section — the only unbounded part of the
   design. Nothing is lost: the archive files stay on disk and `blackboard_recall`

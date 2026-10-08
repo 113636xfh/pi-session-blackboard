@@ -389,6 +389,9 @@ digest 的命中会归属到它来自哪个板节（`recentFiles` 报 `Files`）
   `pi.registerCommand`、`pi.appendEntry`、`pi.sendMessage`）。
 - **零运行时依赖**——只 import `node:*`、`typebox`、`@earendil-works/pi-coding-agent`，
   全部由 pi 的扩展加载器解析。
+- **Node ≥ 22。** pi 自己的包 import 了 `node:fs` 的 `globSync`（Node 22 才有），
+  所以测试套件在 Node 20 上连依赖都加载不了——CI 跑 22.x 和 24.x，
+  `engines.node` 写的是 `>=22`。
 - TypeScript strict；`npm install && npm run typecheck`。
 
 ## 开发

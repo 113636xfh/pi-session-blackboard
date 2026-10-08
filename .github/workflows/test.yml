@@ -10,7 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [20.x, 22.x]
+        # Node >= 22: pi's own package imports `globSync` from `node:fs`
+        # (Node 22+), so the smoke suite cannot load it on 20.x.
+        node-version: [22.x, 24.x]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

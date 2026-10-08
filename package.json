@@ -4,6 +4,9 @@
   "description": "Session blackboard for the pi coding agent: deterministic per-turn extraction, agent-curated commits, deterministic archival — and the board itself becomes the compaction summary, so compaction costs zero summarization calls.",
   "type": "module",
   "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
   "keywords": [
     "pi",
     "pi-coding-agent",

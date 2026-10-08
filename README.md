@@ -428,6 +428,9 @@ flow runs untouched with its own retry policy.
   `pi.sendMessage`).
 - **Zero runtime dependencies** — only `node:*`, `typebox` and
   `@earendil-works/pi-coding-agent`, all resolved by pi's extension loader.
+- **Node ≥ 22.** pi's own package imports `globSync` from `node:fs` (added in
+  Node 22), so the test suite cannot even load its dependency on Node 20 — CI
+  runs 22.x and 24.x, and `engines.node` says `>=22`.
 - TypeScript strict; `npm install && npm run typecheck`.
 
 ## Development
