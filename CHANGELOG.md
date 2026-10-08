@@ -5,6 +5,16 @@ All notable changes to this project are documented here.
 ## 0.2.0 — 2026-10-08
 
 ### Added
+- **Draft and commit are one call.** A `commit` now auto-lands the mechanical
+  draft lines the policy accepts (`draftOnCommit`, default `"deterministic"` =
+  only the zero-heuristic `MODIFIED …` / `COMMIT …` output), and `dropDraft:
+  ["substring"]` rejects draft lines without retyping them. The receipt marks
+  auto-accepted lines `~` against the agent's `+`, and states how many draft
+  lines did **not** land. Measured on 70 debug logs / 26 boards: 258 turns
+  produced 2013 draft lines, there were 143 commits, and only **12**
+  `MODIFIED`/`COMMIT` lines survived (2.2% of board entries) — the draft used to
+  be discarded on commit, so the exact facts this package exists to preserve
+  survived only if the agent retyped them.
 - **Commit receipt instead of a board dump.** A `commit` now echoes back only the
   entries that landed (`+`) plus their nearest older neighbours in the same
   section — budgeted by the new `commitContextEntries` key (default 2). It used

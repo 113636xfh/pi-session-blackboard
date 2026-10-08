@@ -42,6 +42,7 @@ import { archiveDir, boardPath, debugPath, safeSid } from "./paths.js";
 import { defaultState, loadState, saveState } from "./state.js";
 import {
 	archiveEntry,
+	cleanEntryText,
 	commitEntries,
 	countAll,
 	countReal,
@@ -50,6 +51,7 @@ import {
 	readBoardFile,
 	renderBoard,
 	renderCommitEcho,
+	selectDraftLines,
 	resetAll,
 	mergeSummaryIntoBoard,
 	writeBoard,
@@ -267,7 +269,14 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 			...(draft?.experiments?.length
 				? [`Experiments detected this period: ${draft.experiments.join("; ")}. If any produced a key finding, commit one line per finding under findings (what was tested, the result, why it was non-obvious). If none were non-obvious, say nothing.`]
 				: []),
-			`Review the draft: correct inaccuracies, delete noise, then commit what is worth keeping via the \`blackboard\` tool (action="commit", entries=[{section, text, supersedes?}]). Sections: ${COMMIT_SECTIONS.join(", ")}. Each text must be ONE line, factual and specific, max ${cfg.maxEntryChars} chars — timestamps are added automatically. Preserve exact file paths, function names, error messages and numbers.`,
+			// What happens to the draft on the next commit — the agent must know which
+			// lines it has to retype and which it only has to reject.
+			cfg.draftOnCommit === "all"
+				? "The WHOLE draft below lands automatically with your next commit — do NOT retype accepted lines. Your job: cull the noise with dropDraft=[\"substring\"], and add or correct lines in `entries`."
+				: cfg.draftOnCommit === "deterministic"
+					? "The draft's deterministic lines (`MODIFIED …` / `COMMIT …`) land automatically with your next commit — do NOT retype them; reject one with dropDraft=[\"substring\"]. Every other draft line lands ONLY if you write it yourself in `entries`."
+					: "Nothing from the draft lands automatically — anything you want on the board must be written yourself in `entries`.",
+			`Review the draft: correct inaccuracies, delete noise (dropDraft), then commit what is worth keeping via the \`blackboard\` tool (action="commit", entries=[{section, text, supersedes?}]). Sections: ${COMMIT_SECTIONS.join(", ")}. Each text must be ONE line, factual and specific, max ${cfg.maxEntryChars} chars — timestamps are added automatically. Preserve exact file paths, function names, error messages and numbers.`,
 			"Keep the board dense, not chronological: one line per fact, newest state wins.",
 			`When a fact CHANGED, put it on the new line and set supersedes="<unique substring of the old line>": the old line is archived in the same call, so the summary can never show both versions.`,
 			"If nothing is worth keeping, call the tool with action=\"skip\".",
@@ -666,7 +675,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 		name: "blackboard",
 		label: "Session Blackboard",
 		description:
-			"Maintain the session blackboard — durable, session-scoped notes (goal, decisions, findings, files, issues, next steps, preferences) that survive compaction and restarts. Commit reviewed entries (optionally superseding stale ones), skip a pending draft, show the board, or archive entries.",
+			"Maintain the session blackboard — durable, session-scoped notes (goal, decisions, findings, files, issues, next steps, preferences) that survive compaction and restarts. Commit reviewed entries (optionally superseding stale ones, optionally rejecting mechanical draft lines with dropDraft), skip a pending draft, show the board, or archive entries.",
 		promptSnippet: "Commit reviewed entries to, show, skip, or archive the session blackboard",
 		promptGuidelines: [
 			'When a "[session-blackboard checkpoint]" message appears, review the draft it contains, then call blackboard with action="commit" for the entries worth keeping (corrected as needed), or action="skip" if none are.',
@@ -676,11 +685,12 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 			'A fact that CHANGED goes on the new line with supersedes="<unique substring of the old line>" — the old line is archived in the same call, so the summary never carries both versions. Committing a correction WITHOUT supersedes leaves the stale line in place and makes the summary contradict itself.',
 			"After compaction or when resuming a session, call blackboard with action=\"show\" (or read the board file) to restore durable context, and use blackboard_recall to search older entries by keyword.",
 			"A commit echoes back only the entries that landed plus the few lines before each — it is NOT the whole board. When you need the full board use action=\"show\"; when you need an older fact use blackboard_recall.",
+			"Mechanical draft lines the policy auto-accepts (by default the deterministic `MODIFIED …` / `COMMIT …` ones) land with your commit — do NOT retype them. To reject one, name a substring of it in dropDraft=[…] instead.",
 		],
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("commit"), Type.Literal("skip"), Type.Literal("show"), Type.Literal("archive")], {
 				description:
-					'commit: record reviewed entries; skip: discard the pending draft; show: print the current board; archive: move one stale entry to the archive file',
+					'commit: record reviewed entries (mechanical draft lines the policy auto-accepts land with the same call; dropDraft rejects the ones you do not want); skip: discard the pending draft; show: print the current board; archive: move one stale entry to the archive file',
 			}),
 			entries: Type.Optional(
 				Type.Array(
@@ -700,6 +710,12 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 				),
 			),
 			target: Type.Optional(Type.String({ description: "action=archive: unique substring identifying the entry to archive" })),
+			dropDraft: Type.Optional(
+				Type.Array(Type.String(), {
+					description:
+						"action=commit: substrings of PENDING DRAFT lines to reject — they are dropped instead of auto-committed (case-insensitive, no need to retype the line)",
+				}),
+			),
 		}),
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		async execute(_toolCallId: string, params: any, _signal: AbortSignal, _onUpdate: unknown, ctx: AnyCtx) {
@@ -729,7 +745,17 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 									? { section: e.section, text: e.text, supersedes: e.supersedes }
 									: { section: e.section, text: e.text },
 							);
-						if (entries.length === 0) {
+						const st = loadState(dir, s.sessionId);
+						// One call, one review: the draft lines the policy auto-accepts land
+						// with THIS commit (the agent does not retype them — measured, retyping
+						// is exactly how the deterministic facts got lost), and `dropDraft`
+						// substrings cull the ones it rejects. Draft lines first, so the agent's
+						// own wording wins whenever both exist.
+						const drop: string[] = Array.isArray(params.dropDraft)
+							? (params.dropDraft as unknown[]).filter((x): x is string => typeof x === "string")
+							: [];
+						const draftPick = selectDraftLines(st.pendingDraft, s.cfg.draftOnCommit, drop);
+						if (entries.length === 0 && draftPick.selected.length === 0) {
 							return text(
 								"No valid entries provided. Call with entries=[{section, text}] (section: " +
 									COMMIT_SECTIONS.join("|") +
@@ -740,9 +766,8 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 							dir,
 							s.sessionId,
 							s.cfg,
-							entries,
+							[...draftPick.selected, ...entries],
 						);
-						const st = loadState(dir, s.sessionId);
 						clearPending(st);
 						st.checkpointCount += 1;
 						st.turnsSinceCheckpoint = 0;
@@ -756,8 +781,25 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 							archived: archivedFiles.length,
 							superseded: supersededFiles.length,
 							supersedeMisses: supersedeMisses.length,
+							draftAuto: draftPick.selected.length,
+							draftDropped: draftPick.dropped,
+							draftPolicy: s.cfg.draftOnCommit,
 						});
-						const parts: string[] = [`Committed ${committed} ${committed === 1 ? "entry" : "entries"}${deduped ? ` (${deduped} duplicate${deduped === 1 ? "" : "s"} skipped)` : ""}. Blackboard v${st.boardVersion}.`];
+						const autoLanded = new Set(draftPick.selected.map((d) => cleanEntryText(d.text, s.cfg.maxEntryChars)));
+						const autoCount = added.filter((a) => autoLanded.has(a.text)).length;
+						const bits: string[] = [];
+						if (autoCount > 0) bits.push(`${autoCount} auto-accepted from the mechanical draft`);
+						if (deduped > 0) bits.push(`${deduped} duplicate${deduped === 1 ? "" : "s"} skipped`);
+						const parts: string[] = [
+							`Committed ${committed} ${committed === 1 ? "entry" : "entries"}${bits.length ? ` (${bits.join(", ")})` : ""}. Blackboard v${st.boardVersion}.`,
+						];
+						if (draftPick.dropped > 0) parts.push(`Dropped ${draftPick.dropped} draft line(s) matching dropDraft.`);
+						const notAuto = draftPick.total - draftPick.selected.length - draftPick.dropped;
+						if (notAuto > 0) {
+							parts.push(
+								`${notAuto} draft line(s) did NOT land (draftOnCommit="${s.cfg.draftOnCommit}" leaves them to you) — the draft is now cleared; rewrite them in the next commit if they matter.`,
+							);
+						}
 						if (supersededFiles.length > 0) {
 							parts.push(
 								`Replaced entries archived → ${supersededFiles.join(", ")} (still searchable via blackboard_recall).`,
@@ -775,10 +817,14 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 						// `commitContextEntries` lines before each — enough to pick the next
 						// `supersedes` substring without re-paying for the whole board every
 						// commit. Everything else is one `show` / `blackboard_recall` away.
-						const echo = renderCommitEcho(board, added, s.cfg.commitContextEntries);
+						const echo = renderCommitEcho(
+							board,
+							added.map((a) => ({ ...a, auto: autoLanded.has(a.text) })),
+							s.cfg.commitContextEntries,
+						);
 						if (echo) {
 							parts.push(
-								`Board after commit — your entries (+), each preceded by its ${s.cfg.commitContextEntries} nearest older entries:\n${echo}`,
+								`Board after commit — your entries (+) and auto-accepted draft lines (~), each preceded by its ${s.cfg.commitContextEntries} nearest older entries:\n${echo}`,
 							);
 							parts.push(`Full board: ${boardPath(dir, s.sessionId)} — use action="show" or blackboard_recall, do not re-read the file.`);
 						}

@@ -106,6 +106,9 @@ pi install /path/to/pi-session-blackboard     # 用户级；-l 为项目级
 [context pressure] compaction is 3.3k away — context is at 95.0k of 131k tokens
 (pi compacts above 98.3k = window − reserve 32.8k). NEAR COMPACTION — commit what
 matters from this turn onto the board NOW …
+The draft's deterministic lines (`MODIFIED …` / `COMMIT …`) land automatically with
+your next commit — do NOT retype them; reject one with dropDraft=["substring"].
+Every other draft line lands ONLY if you write it yourself in `entries`.
 --- draft ---
 ## Files
 - MODIFIED src/board.ts (commitEntries, renderCommitEcho)
@@ -121,22 +124,30 @@ matters from this turn onto the board NOW …
 { "action": "commit", "entries": [
   { "section": "decisions", "text": "commit 回执只返回新行 + 每节 2 条上下文",
     "supersedes": "commit 返回整块板" }
-]}
+], "dropDraft": ["[ERROR] npm test"] }
 ```
 
-回执刻意做得很小——你的条目用 `+` 标出，前面是同节最近的 2 条（足够挑下一个
-`supersedes` 的目标子串）：
+机械草稿不需要重打：确定性那几行（`MODIFIED …`、`COMMIT …`）随这次 commit 一起落板，
+回执里标 `~`。回执本身很小——你的条目 `+`，自动接受的草稿行 `~`，前面各带同节最近的
+2 条（足够挑下一个 `supersedes` 的目标子串）：
 
 ```
-Committed 1 entry. Blackboard v7.
+Committed 3 entries (2 auto-accepted from the mechanical draft). Blackboard v7.
+1 draft line did NOT land (draftOnCommit="deterministic" leaves them to you) — the draft is now cleared; rewrite them in the next commit if they matter.
 Replaced entries archived → archive/<sid>/superseded-20261008-134102.md (still searchable via blackboard_recall).
 
-Board after commit — your entries (+), each preceded by its 2 nearest older entries:
+Board after commit — your entries (+) and auto-accepted draft lines (~), each preceded by its 2 nearest older entries:
 
 ## Decisions — 1 new
-  [2026-10-08 13:02] board 模式把板作为摘要返回：pi 的切点和保留尾部仍是 pi 的
+  [2026-10-08 13:02] board 模式把板作为摘要返回
   [2026-10-08 13:20] supersedes 必须给唯一子串
 + [2026-10-08 13:41] commit 回执只返回新行 + 每节 2 条上下文
+
+## Files — 2 new
+  [2026-10-08 13:02] MODIFIED src/summary.ts (renderSummary)
+  [2026-10-08 13:20] MODIFIED src/recall.ts (searchDigest)
+~ [2026-10-08 13:41] MODIFIED src/board.ts (commitEntries, renderCommitEcho)
+~ [2026-10-08 13:41] COMMIT 93c32ad 手动原生压缩按钮 /bb compact
 
 Full board: ~/.pi/agent/blackboard/<sid>.md — use action="show" or blackboard_recall, do not re-read the file.
 ```
@@ -168,6 +179,30 @@ compaction: board | 3.3k tokens left until pi's native trigger
    永久可搜）。
 
 开放 issue 引用的文件后来被改过，会自动标 `[RESOLVED <ts>]`。
+
+### 草稿和 commit 是一次调用
+
+机械抽取从不直接写板——它填的是一份**待审草稿**。以前的做法是：草稿展示出来，然后
+被丢弃，所以一条抽取到的事实能不能活下来，取决于代理有没有重新打字写一遍。
+实测 70 份 debug 日志 + 26 块真实板子：258 个回合产出 **2013 行草稿**，发生了
+143 次 commit，而板子上只留下 **12 行** `MODIFIED`/`COMMIT`，模型自己写的有 528 行
+（2.2%）——**本扩展存在的理由正是保住这些精确事实，而它们恰恰是丢得最干净的**；
+至于重打其余的行，那是输出 token（草稿均值 7.6 行、中位 5、p90 17、最大 45）。
+
+现在一次 commit 同时带两部分：
+
+| 部分 | 是什么 |
+|---|---|
+| `entries` | 代理自己写的——它的决策、发现、更正 |
+| 自动接受的草稿行 | `draftOnCommit: "deterministic"`（默认）：只含零启发式的抽取输出，即 `MODIFIED <path> (符号)` 和 `COMMIT <hash> <subject>` |
+| `dropDraft: ["子串"]` | 代理**拒绝**的草稿行——大小写不敏感，不用重打 |
+
+启发式抽取那几类（助手句式挖出的 decisions/findings/next、`[ERROR]` 行、偏好句式、
+scope 变化）故意仍要代理自己写：它们只是起点，而且确实会误报。
+`draftOnCommit: "all"` 翻转默认值——整块草稿落板，代理只负责剔；`"none"` 回到全部重打。
+
+不管哪种策略，commit 都会清空草稿，并在回执里说明**有多少行没落板**——漏洞是可见的，
+不是静默的。
 
 ### 压缩：板即摘要
 
@@ -233,7 +268,7 @@ token 数未知时（刚压缩完、下一条回复还没来）不打印任何�
 | `Goal` | 开场任务；之后只收显式转向（`instead`、`actually`、`switch to`…）的 `[Scope change]` | 抽取 + 审校 |
 | `Decisions` | 选择**和理由**——审校环节决定它值不值得读 | 代理为主 |
 | `Findings` | 探索/实验的结论：实测数字、根因、坑 | 代理为主 |
-| `Files` | `MODIFIED <path> (导出符号)` 和 `COMMIT <hash> <subject>` | 确定性 |
+| `Files` | `MODIFIED <path> (导出符号)` 和 `COMMIT <hash> <subject>` —— 默认随每次 commit 自动落板 | 确定性 |
 | `Issues` | `[ERROR] <cmd>: <首行报错>`；文件被修好时自动 `[RESOLVED <ts>]` | 抽取 + 审校 |
 | `Next` | 具体的下一步 | 抽取 + 审校 |
 | `Prefs` | 「always / never / prefer / 请用…」类表述 | 抽取 + 审校 |
@@ -298,6 +333,7 @@ digest 的命中会归属到它来自哪个板节（`recentFiles` 报 `Files`）
     "maxEntriesPerSection": 40,
     "maxEntryChars": 300,
     "maxDraftLines": 60,
+    "draftOnCommit": "deterministic",
     "commitContextEntries": 2,
     "summaryMaxChars": 6000,
     "compactAssist": true,
@@ -320,6 +356,7 @@ digest 的命中会归属到它来自哪个板节（`recentFiles` 报 `Files`）
 | `maxEntriesPerSection` | `40` | 每节轮转阈值 |
 | `maxEntryChars` | `300` | 每条上限（收编外来摘要时放宽到 600——硬切在理由中间会丢掉关键部分） |
 | `maxDraftLines` | `60` | checkpoint 渲染的草稿大小上限 |
+| `draftOnCommit` | `"deterministic"` | 哪些草稿行随 commit 自动落板而不必重打：`"none"` / `"deterministic"`（只 `MODIFIED`+`COMMIT`）/ `"all"`（代理用 `dropDraft` 剔） |
 | `commitContextEntries` | `2` | commit 回执里每节回带多少条旧行做上下文。`0` = 只回新行 |
 | `summaryMaxChars` | 6000 | 板渲染为摘要的硬上限（页脚先预留） |
 | `compactAssist` / `compactAssistMaxChars` | `true` / `4000` | legacy 辅助路径（见下） |
@@ -341,7 +378,7 @@ digest 的命中会归属到它来自哪个板节（`recentFiles` 报 `Files`）
 |---|---|
 | 后台 LLM 调用 | **永远没有** |
 | 额外 prefill | 无（抽取纯 CPU） |
-| prompt 开销 | checkpoint 消息（~1–3k tokens，追加在尾部，前缀缓存完好）+ 很小的 commit 回执 |
+| prompt 开销 | checkpoint 消息（~1–3k tokens，追加在尾部，前缀缓存完好）+ 很小的 commit 回执；自动接受的草稿行**不花**代理的输出 token |
 | 归档 | 确定性文件轮转 |
 | 压缩 | `"board"`：渲染板作为摘要，跳过 pi 的摘要调用（薄板 → 原生）；`"off"`/`"digest"`：原生，可选追加节 / 镜像 digest |
 
@@ -359,7 +396,7 @@ digest 的命中会归属到它来自哪个板节（`recentFiles` 报 `Files`）
 ```bash
 npm install          # 只有 devDependencies；扩展本身零运行时依赖
 npm run typecheck    # tsc --noEmit
-npm test             # build (tsc → build/) + node test/smoke.mjs   （50 项断言）
+npm test             # build (tsc → build/) + node test/smoke.mjs   （54 项断言）
 npm run docs:render  # SVG → PNG（resvg，确定性，无浏览器）
 ```
 
@@ -384,6 +421,9 @@ commit + supersedes + 轮转 + 指针上限、收编解析、倒计时数学、l
   + 可见警告；下个用户回合重新触发。临近压缩的提醒不消耗这 3 次额度。
 - **助手文本挖掘（decisions/next/findings）故意轻且限量。** 它是审校的起点，不是
   事实源。
+- **自动落板的 `Files` 行没经过审校。** 它们来自工具参数（哪个文件、哪个导出符号、
+  哪个 commit 哈希），所以是精确的——但「精确」不等于「相关」：一个碰了 30 个文件的
+  会话就会得到 30 行。想让每一行都过代理的手，就设 `draftOnCommit: "none"`。
 - **`[ERROR]` 抽取器是对原始工具输出的启发式，确实会误报。** 实测过：测试输出里回显的
   `[ERROR]` 行；`grep -c` 零匹配导致退出码 1（测试其实*通过*了）。审校环节是缓解手段；
   抽取会继续犯这类错。

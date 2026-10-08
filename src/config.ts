@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { DraftPolicy } from "./board.js";
 
 export type SbbConfig = {
 	enabled: boolean;
@@ -56,6 +57,13 @@ export type SbbConfig = {
 	/** max draft lines rendered into a checkpoint message. */
 	maxDraftLines: number;
 	/**
+	 * Which mechanical draft lines land with a commit without the agent retyping
+	 * them: "none" (agent retypes everything), "deterministic" (default — only
+	 * `MODIFIED …` / `COMMIT …`, the zero-heuristic extractor output), or "all"
+	 * (the whole draft lands; the agent culls with `dropDraft`).
+	 */
+	draftOnCommit: DraftPolicy;
+	/**
 	 * How many pre-existing entries per section a `commit` echoes back next to
 	 * the entries that just landed (0 = only the new ones). The receipt used to
 	 * return the whole board; this is the budget for its context tail. The full
@@ -89,6 +97,7 @@ export const DEFAULTS: SbbConfig = {
 	summaryMaxChars: 6000,
 	maxEntryChars: 300,
 	maxDraftLines: 60,
+	draftOnCommit: "deterministic",
 	commitContextEntries: 2,
 	seedFromPriorSummary: true,
 	compactionWarnTokens: 32768,
@@ -251,6 +260,10 @@ export function loadConfig(cwd: string): SbbConfig {
 	cfg.maxEntryChars = Math.max(100, Math.floor(pickNum(all, "maxEntryChars", cfg.maxEntryChars)));
 	cfg.maxDraftLines = Math.max(10, Math.floor(pickNum(all, "maxDraftLines", cfg.maxDraftLines)));
 	cfg.commitContextEntries = Math.max(0, Math.min(20, Math.floor(pickNum(all, "commitContextEntries", cfg.commitContextEntries))));
+	const draftPolicy = pickStr(all, "draftOnCommit", cfg.draftOnCommit);
+	cfg.draftOnCommit = (["none", "deterministic", "all"] as const).includes(draftPolicy as DraftPolicy)
+		? (draftPolicy as DraftPolicy)
+		: "deterministic";
 	cfg.compactionWarnTokens = Math.max(0, Math.floor(pickNum(all, "compactionWarnTokens", cfg.compactionWarnTokens)));
 	cfg.seedFromPriorSummary = pickBool(all, "seedFromPriorSummary", cfg.seedFromPriorSummary);
 	cfg.mirrorToSession = pickBool(all, "mirrorToSession", cfg.mirrorToSession);

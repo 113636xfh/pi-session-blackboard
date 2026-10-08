@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { renderSummary, SUMMARY_MIN_ENTRIES } from "../build/summary.js";
 import { formatRecall, searchDigest, searchDocument } from "../build/recall.js";
 import { renderAssistSection } from "../build/compact-assist.js";
-import { commitEntries, mergeSummaryIntoBoard, parseSummarySections, readBoardFile, renderBoard, renderCommitEcho, MAX_POINTER_LINES } from "../build/board.js";
+import { commitEntries, mergeSummaryIntoBoard, parseSummarySections, readBoardFile, renderBoard, renderCommitEcho, selectDraftLines, MAX_POINTER_LINES } from "../build/board.js";
 import { extractAll } from "../build/extract.js";
 import { computePressure, describePressure, fmtTokens, resolveReserveFromSources, PI_DEFAULT_RESERVE_TOKENS, DEFAULTS } from "../build/config.js";
 import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync } from "node:fs";
@@ -331,6 +331,57 @@ check("a rotation pointer is never echoed as new or as context", () => {
 
 check("the receipt context budget is configurable and defaults to 2", () => {
 	assert.equal(DEFAULTS.commitContextEntries, 2);
+});
+
+
+// ── draft policy: mechanical lines land with the commit, not by retyping ──
+// (measured on 70 debug logs / 26 boards: 2013 draft lines produced, 143 commits,
+// and only 12 MODIFIED/COMMIT lines survived — the deterministic facts were lost
+// because the agent had to retype them)
+
+const mkDraft = (sections) => ({ generatedAt: "2026-10-08T00:00:00Z", sections });
+
+check("the deterministic policy auto-lands only MODIFIED/COMMIT draft lines", () => {
+	const d = mkDraft({
+		files: ["MODIFIED src/board.ts (commitEntries)", "COMMIT 93c32ad /bb compact", "a mined prose line in files"],
+		issues: ["[ERROR] npm test: FAIL 1/46"],
+		decisions: ["we'll use the board as the summary"],
+	});
+	const det = selectDraftLines(d, "deterministic", []);
+	assert.deepEqual(
+		det.selected.map((x) => x.text),
+		["MODIFIED src/board.ts (commitEntries)", "COMMIT 93c32ad /bb compact"],
+		"only the zero-heuristic extractor output",
+	);
+	assert.equal(det.total, 5, "the draft total is reported for the receipt");
+	assert.equal(selectDraftLines(d, "all", []).selected.length, 5, "all lands every line");
+	assert.equal(selectDraftLines(d, "none", []).selected.length, 0, "none lands nothing");
+});
+
+check("dropDraft rejects draft lines by case-insensitive substring", () => {
+	const d = mkDraft({ files: ["MODIFIED src/a.ts", "MODIFIED src/b.ts", "COMMIT deadbeef fix"], issues: ["[ERROR] grep -c zero matches"] });
+	const det = selectDraftLines(d, "deterministic", ["src/b.ts"]);
+	assert.deepEqual(det.selected.map((x) => x.text), ["MODIFIED src/a.ts", "COMMIT deadbeef fix"]);
+	assert.equal(det.dropped, 1);
+	const all = selectDraftLines(d, "all", ["[error]", "MODIFIED SRC/B.TS"]);
+	assert.equal(all.dropped, 2, "matching is case-insensitive on both sides");
+	assert.equal(all.selected.length, 2);
+});
+
+check("the receipt marks auto-accepted draft lines with ~ and agent lines with +", () => {
+	const dir = tmpBoard();
+	const sid = "echo-4";
+	const r = commitEntries(dir, sid, CFG, [
+		{ section: "files", text: "MODIFIED src/a.ts" },
+		{ section: "decisions", text: "written by the agent" },
+	]);
+	const echo = renderCommitEcho(r.board, r.added.map((a) => ({ ...a, auto: a.text.startsWith("MODIFIED") })), 2);
+	assert.ok(/^~ \[.+\] MODIFIED src\/a\.ts$/m.test(echo), `auto line must be marked ~:\n${echo}`);
+	assert.ok(/^\+ \[.+\] written by the agent$/m.test(echo), `agent line must be marked +:\n${echo}`);
+});
+
+check("draftOnCommit defaults to deterministic", () => {
+	assert.equal(DEFAULTS.draftOnCommit, "deterministic");
 });
 
 

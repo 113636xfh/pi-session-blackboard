@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { Board, BoardEntry, Section } from "./types.js";
+import type { Board, BoardEntry, DraftSections, PendingDraft, Section } from "./types.js";
 import { SECTION_HEADERS, SECTIONS } from "./types.js";
 import { archiveDir, boardPath, safeSid, statePath } from "./paths.js";
 
@@ -628,6 +628,63 @@ export function commitEntries(
 }
 
 /**
+ * Which mechanical draft lines land with a commit WITHOUT the agent retyping
+ * them.
+ *
+ * Measured on 70 debug logs / 26 real boards: extraction produced 2013 draft
+ * lines over 258 turns, but only 143 commits happened, and the boards carry
+ * just 12 `MODIFIED`/`COMMIT` lines against 528 agent-written ones (2.2%).
+ * The draft used to be discarded on commit, so a deterministic fact survived
+ * only if the model retyped it — and the exact facts this package exists to
+ * preserve (which file, which symbol, which commit hash) were the ones lost.
+ *
+ *  - "none": today's old behaviour — the agent must retype everything;
+ *  - "deterministic" (default): only the zero-heuristic extractor output
+ *    (`MODIFIED <path> (symbols)` / `COMMIT <hash> <subject>`) auto-lands.
+ *    The prose-mined sections (decisions/findings/issues/next/prefs/goal) stay
+ *    heuristic and still require the agent's own line;
+ *  - "all": the whole draft lands; the agent's job becomes culling (`dropDraft`).
+ */
+export type DraftPolicy = "none" | "deterministic" | "all";
+
+/** The line prefixes the deterministic extractors emit (no pattern mining). */
+const DETERMINISTIC_PREFIXES = ["MODIFIED ", "COMMIT "];
+
+/**
+ * Split the pending draft into what a commit should auto-land and what the
+ * agent explicitly dropped (`dropDraft` substrings, case-insensitive).
+ *
+ * Pure so the smoke suite can assert the policy and the culling.
+ */
+export function selectDraftLines(
+	draft: PendingDraft | null | undefined,
+	policy: DraftPolicy,
+	drop: string[] = [],
+): { selected: { section: Section; text: string }[]; dropped: number; total: number } {
+	const sections: DraftSections = draft?.sections ?? {};
+	let total = 0;
+	for (const s of SECTIONS) if (s !== "archived") total += (sections[s] ?? []).length;
+	if (policy === "none" || !draft) return { selected: [], dropped: 0, total };
+	const needles = drop.map((d) => String(d ?? "").trim().toLowerCase()).filter(Boolean);
+	const selected: { section: Section; text: string }[] = [];
+	let dropped = 0;
+	for (const s of SECTIONS) {
+		if (s === "archived") continue;
+		for (const text of sections[s] ?? []) {
+			const deterministic = s === "files" && DETERMINISTIC_PREFIXES.some((p) => text.startsWith(p));
+			if (policy === "deterministic" && !deterministic) continue;
+			const low = text.toLowerCase();
+			if (needles.some((n) => low.includes(n))) {
+				dropped++;
+				continue;
+			}
+			selected.push({ section: s, text });
+		}
+	}
+	return { selected, dropped, total };
+}
+
+/**
  * The commit receipt: the entries that just landed, plus the `context` entries
  * sitting directly before them in the same section.
  *
@@ -638,19 +695,20 @@ export function commitEntries(
  * what it gets. `action="show"`, `blackboard_recall` and the board file itself
  * remain the way to see everything else.
  *
- * `+` marks what landed, ` ` is older context, newest last.
+ * `+` = the agent wrote it, `~` = it came from the mechanical draft, ` ` is
+ * older context, newest last.
  */
 export function renderCommitEcho(
 	board: Board,
-	added: { section: Section; text: string }[],
+	added: { section: Section; text: string; auto?: boolean }[],
 	context: number,
 ): string {
 	if (added.length === 0) return "";
-	const fresh = new Map<Section, Set<string>>();
+	const fresh = new Map<Section, Map<string, boolean>>();
 	for (const a of added) {
-		const set = fresh.get(a.section) ?? new Set<string>();
-		set.add(a.text);
-		fresh.set(a.section, set);
+		const map = fresh.get(a.section) ?? new Map<string, boolean>();
+		map.set(a.text, a.auto === true);
+		fresh.set(a.section, map);
 	}
 	const lines: string[] = [];
 	for (const s of SECTIONS) {
@@ -662,7 +720,7 @@ export function renderCommitEcho(
 		// commit's block; everything before it is older board state. Rotation
 		// pointers are not facts — the archive files are reported separately.
 		let first = arr.length;
-		for (const t of texts) {
+		for (const t of texts.keys()) {
 			const i = arr.findIndex((e) => e.text === t);
 			if (i >= 0) first = Math.min(first, i);
 		}
@@ -671,7 +729,10 @@ export function renderCommitEcho(
 		for (const e of older.slice(Math.max(0, older.length - context))) lines.push(`  [${e.ts}] ${e.text}`);
 		// Only the landed lines: a rotation pointer pushed after them is reported
 		// separately as an archive file, not as a new entry.
-		for (const e of arr.slice(first)) if (texts.has(e.text)) lines.push(`+ [${e.ts}] ${e.text}`);
+		for (const e of arr.slice(first)) {
+			if (!texts.has(e.text)) continue;
+			lines.push(`${texts.get(e.text) ? "~" : "+"} [${e.ts}] ${e.text}`);
+		}
 	}
 	return lines.join("\n").trimStart();
 }

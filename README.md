@@ -115,6 +115,9 @@ compaction, and one blunt instruction: *what you commit here is the summary.*
 [context pressure] compaction is 3.3k away — context is at 95.0k of 131k tokens
 (pi compacts above 98.3k = window − reserve 32.8k). NEAR COMPACTION — commit what
 matters from this turn onto the board NOW …
+The draft's deterministic lines (`MODIFIED …` / `COMMIT …`) land automatically with
+your next commit — do NOT retype them; reject one with dropDraft=["substring"].
+Every other draft line lands ONLY if you write it yourself in `entries`.
 --- draft ---
 ## Files
 - MODIFIED src/board.ts (commitEntries, renderCommitEcho)
@@ -130,22 +133,32 @@ matters from this turn onto the board NOW …
 { "action": "commit", "entries": [
   { "section": "decisions", "text": "commit receipt returns only the new lines + 2 per section",
     "supersedes": "commit returns the whole board" }
-]}
+], "dropDraft": ["[ERROR] npm test"] }
 ```
 
-The receipt is deliberately small — your entries marked `+`, each preceded by its
-2 nearest older entries (that's enough to pick the next `supersedes` substring):
+The mechanical draft does not have to be retyped: the deterministic lines
+(`MODIFIED …`, `COMMIT …`) land with this same commit, marked `~` in the receipt.
+The receipt itself stays small — your entries `+`, auto-accepted draft lines `~`,
+each preceded by its 2 nearest older entries (enough to pick the next
+`supersedes` substring):
 
 ```
-Committed 1 entry. Blackboard v7.
+Committed 3 entries (2 auto-accepted from the mechanical draft). Blackboard v7.
+1 draft line did NOT land (draftOnCommit="deterministic" leaves them to you) — the draft is now cleared; rewrite them in the next commit if they matter.
 Replaced entries archived → archive/<sid>/superseded-20261008-134102.md (still searchable via blackboard_recall).
 
-Board after commit — your entries (+), each preceded by its 2 nearest older entries:
+Board after commit — your entries (+) and auto-accepted draft lines (~), each preceded by its 2 nearest older entries:
 
 ## Decisions — 1 new
   [2026-10-08 13:02] board mode returns the board as the summary
   [2026-10-08 13:20] supersedes must name a unique substring
 + [2026-10-08 13:41] commit receipt returns only the new lines + 2 per section
+
+## Files — 2 new
+  [2026-10-08 13:02] MODIFIED src/summary.ts (renderSummary)
+  [2026-10-08 13:20] MODIFIED src/recall.ts (searchDigest)
+~ [2026-10-08 13:41] MODIFIED src/board.ts (commitEntries, renderCommitEcho)
+~ [2026-10-08 13:41] COMMIT 93c32ad 手动原生压缩按钮 /bb compact
 
 Full board: ~/.pi/agent/blackboard/<sid>.md — use action="show" or blackboard_recall, do not re-read the file.
 ```
@@ -179,6 +192,34 @@ Three parts, and exactly one of them involves a model:
 
 Open issues whose referenced file was later modified get marked `[RESOLVED <ts>]`
 automatically.
+
+### Draft and commit are one call
+
+Mechanical extraction never writes to the board by itself — it fills a **pending
+draft**. What used to happen: the draft was displayed, then discarded, so a mined
+fact survived only if the agent retyped it. Measured over 70 debug logs and 26
+real boards: 258 turns produced **2013 draft lines**, there were 143 commits, and
+the boards kept just **12** `MODIFIED`/`COMMIT` lines against 528 agent-written
+ones (2.2%) — the exact facts this package exists to preserve were precisely the
+ones being lost, and retyping the rest is output-token work (mean draft 7.6
+lines, median 5, p90 17, max 45).
+
+A commit now carries both halves:
+
+| part | what it is |
+|---|---|
+| `entries` | what the agent writes itself — its decisions, findings, corrections |
+| auto-accepted draft | `draftOnCommit: "deterministic"` (default): only the zero-heuristic extractor output, `MODIFIED <path> (symbols)` and `COMMIT <hash> <subject>` |
+| `dropDraft: ["substring"]` | the draft lines the agent **rejects** — case-insensitive, no retyping |
+
+The heuristic extractors (prose-mined decisions/findings/next, `[ERROR]` lines,
+preference patterns, scope changes) deliberately stay under the agent's pen: they
+are starting points and they do produce false positives. `draftOnCommit: "all"`
+flips it so the whole draft lands and the agent only culls; `"none"` restores
+retype-everything.
+
+Whatever the policy, the commit clears the draft and the receipt states how many
+draft lines did **not** land — the leak is visible instead of silent.
 
 ### Compaction: the board is the summary
 
@@ -255,7 +296,7 @@ One line per fact, auto-timestamped, capped at `maxEntryChars` (300):
 | `Goal` | the opening task; later only explicit pivots (`instead`, `actually`, `switch to`, …) as `[Scope change]` | extraction + review |
 | `Decisions` | choices **and why** — the review pass is what makes these worth reading | mostly the agent |
 | `Findings` | results of exploration/experiments: the measured number, the root cause, the gotcha | mostly the agent |
-| `Files` | `MODIFIED <path> (exported symbols)` and `COMMIT <hash> <subject>` | deterministic |
+| `Files` | `MODIFIED <path> (exported symbols)` and `COMMIT <hash> <subject>` — auto-accepted with each commit by default | deterministic |
 | `Issues` | `[ERROR] <cmd>: <first error line>`; auto-`[RESOLVED <ts>]` when the file gets fixed | extraction + review |
 | `Next` | the concrete next step | extraction + review |
 | `Prefs` | "always / never / prefer / please …" statements | extraction + review |
@@ -328,6 +369,7 @@ Key `"session-blackboard"` in `~/.pi/agent/settings.json` (user) or
     "maxEntriesPerSection": 40,
     "maxEntryChars": 300,
     "maxDraftLines": 60,
+    "draftOnCommit": "deterministic",
     "commitContextEntries": 2,
     "summaryMaxChars": 6000,
     "compactAssist": true,
@@ -350,6 +392,7 @@ Key `"session-blackboard"` in `~/.pi/agent/settings.json` (user) or
 | `maxEntriesPerSection` | `40` | per-section budget before rotation |
 | `maxEntryChars` | `300` | per-entry cap (adopted foreign summaries get 600 — a hard cut mid-rationale loses the part that matters) |
 | `maxDraftLines` | `60` | draft size rendered into a checkpoint message |
+| `draftOnCommit` | `"deterministic"` | which draft lines land with a commit without being retyped: `"none"` / `"deterministic"` (`MODIFIED`+`COMMIT` only) / `"all"` (agent culls with `dropDraft`) |
 | `commitContextEntries` | `2` | how many older entries per section a commit echoes back next to the new ones. `0` = only the new ones |
 | `summaryMaxChars` | `6000` | hard cap for the board rendered as the summary (footer reserved first) |
 | `compactAssist` / `compactAssistMaxChars` | `true` / `4000` | legacy assist path (see below) |
@@ -373,7 +416,7 @@ flow runs untouched with its own retry policy.
 |---|---|
 | background LLM calls | **never** |
 | extra prefill | none (extraction is pure CPU) |
-| prompt overhead | the checkpoint message (~1–3k tokens, appended at the end, so the prefix cache survives) + the small commit receipt |
+| prompt overhead | the checkpoint message (~1–3k tokens, appended at the end, so the prefix cache survives) + the small commit receipt; the auto-accepted draft lines cost **no** agent output tokens |
 | archival | deterministic file rotation |
 | compaction | `"board"`: render the board, skip pi's summarization call (thin board → native). `"off"`/`"digest"`: native, optionally with an appended section / mirrored digest |
 
@@ -392,7 +435,7 @@ flow runs untouched with its own retry policy.
 ```bash
 npm install          # devDependencies only; the extension itself has none
 npm run typecheck    # tsc --noEmit
-npm test             # build (tsc → build/) + node test/smoke.mjs   (50 checks)
+npm test             # build (tsc → build/) + node test/smoke.mjs   (54 checks)
 npm run docs:render  # SVG → PNG via resvg (deterministic, no browser)
 ```
 
@@ -424,6 +467,10 @@ purpose.
   that budget.
 - **Assistant-text mining (decisions/next/findings) is deliberately light and
   capped.** It is a starting point for the review pass, not a source of truth.
+- **Auto-accepted `Files` lines are not reviewed.** They come from tool arguments
+  (which file, which exported symbol, which commit hash), so they are exact — but
+  "exact" is not "relevant": a session that touches 30 files gets 30 lines. Set
+  `draftOnCommit: "none"` if you want every line to pass through the agent.
 - **The `[ERROR]` extractor is a heuristic over raw tool output** and does
   produce false positives — observed: an `[ERROR]` line echoed inside test
   output, and a `grep -c` with zero matches (exit code 1) on a run that actually
