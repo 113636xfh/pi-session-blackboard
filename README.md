@@ -8,15 +8,16 @@ hands the draft to the agent for review, and writes what survives to disk. When
 compaction fires, **that file is the summary**: pi's summarization call is skipped
 entirely, and pi's own cut-point, retained tail and compaction entry are untouched.
 
-> ⚠️ **The honest warning.** `"board"` mode buys cost and determinism with summary
-> *quality*: an LLM summary re-narrates the conversation, while a board replays
-> only what was committed to it — expect to lose connective tissue, not facts.
-> The floor under it: pi's retained tail is still verbatim, every superseded and
-> rotated line stays on disk and is searchable via `blackboard_recall` (live board
-> + `archive/` + snapshot digests) or `/bb show`, and a thin board falls back to
-> native summarization. The default `compaction: "off"` never touches pi's native
-> flow. The core path is covered by a 54-check smoke suite and by daily use in
-> real sessions. Feedback in [issues](https://github.com/113636xfh/pi-session-blackboard/issues) is welcome;
+> ⚠️ **The honest warning.** `"board"` mode buys cost and determinism with
+> summary *quality*: an LLM summary re-narrates the conversation, while a board
+> replays only what was committed to it — expect to lose connective tissue, not
+> facts. The floor under it: pi's retained tail is still verbatim; every
+> superseded and rotated line stays on disk and is searchable via
+> `blackboard_recall` (the live board, `archive/`, and the snapshot digests) or
+> `/bb show`; and a thin board falls back to native summarization. The default
+> `compaction: "off"` never touches pi's native flow. The core path is covered by
+> a 54-check smoke suite and by daily use in real sessions. Feedback in
+> [issues](https://github.com/113636xfh/pi-session-blackboard/issues) is welcome;
 > also read [Limitations](#limitations-the-honest-version).
 
 [![test](https://github.com/113636xfh/pi-session-blackboard/actions/workflows/test.yml/badge.svg)](https://github.com/113636xfh/pi-session-blackboard/actions/workflows/test.yml)
