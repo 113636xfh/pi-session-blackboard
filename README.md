@@ -8,11 +8,16 @@ hands the draft to the agent for review, and writes what survives to disk. When
 compaction fires, **that file is the summary**: pi's summarization call is skipped
 entirely, and pi's own cut-point, retained tail and compaction entry are untouched.
 
-> ⚠️ **Experimental.** The core path (board → summary, extraction, archival
-> rotation) is covered by the smoke suite; checkpoint delivery and summary
-> adoption depend on real session behaviour and have not been battle-tested
-> across many long sessions. Feedback in [issues](https://github.com/113636xfh/pi-session-blackboard/issues) is welcome.
-> Also read [Limitations](#limitations-the-honest-version) before relying on it.
+> ⚠️ **The honest warning.** `"board"` mode buys cost and determinism with summary
+> *quality*: an LLM summary re-narrates the conversation, while a board replays
+> only what was committed to it — expect to lose connective tissue, not facts.
+> The floor under it: pi's retained tail is still verbatim, every superseded and
+> rotated line stays on disk and is searchable via `blackboard_recall` (live board
+> + `archive/` + snapshot digests) or `/bb show`, and a thin board falls back to
+> native summarization. The default `compaction: "off"` never touches pi's native
+> flow. The core path is covered by a 54-check smoke suite and by daily use in
+> real sessions. Feedback in [issues](https://github.com/113636xfh/pi-session-blackboard/issues) is welcome;
+> also read [Limitations](#limitations-the-honest-version).
 
 [![test](https://github.com/113636xfh/pi-session-blackboard/actions/workflows/test.yml/badge.svg)](https://github.com/113636xfh/pi-session-blackboard/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -485,6 +490,13 @@ purpose.
 
 ## Limitations (the honest version)
 
+- **Board mode is a quality trade against native compaction.** An LLM summary
+  re-narrates the conversation; the board replays the committed lines, so what you
+  give up is the connective tissue — tone, hedging, half-formed reasoning, and
+  anything that was never written down. Nothing is thrown away: pi's retained tail
+  stays verbatim, superseded and rotated lines stay on disk, and `blackboard_recall`
+  / `/bb show` let the agent go back and re-read them. If you would rather pay the
+  model call, `compaction: "off"` (the default) keeps pi's native summary.
 - **Curation is prompt-enforced, not guaranteed.** The model can ignore a
   checkpoint. Mitigations: at most 3 re-injections plus a visible warning, and a
   fresh trigger on the next user turn. Near-compaction nudges do not consume

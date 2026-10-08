@@ -7,9 +7,13 @@
 压缩触发时，**这个文件就是摘要**：pi 的摘要模型调用被整个跳过，而 pi 自己的切点算法、
 保留尾部、compaction entry 全部不变。
 
-> ⚠️ **实验性项目。** 核心路径（板→摘要、抽取、归档轮转）有 smoke 测试覆盖；
-> checkpoint 投递和摘要收编依赖真实会话行为，尚未经过多会话长时间验证。
-> 欢迎在 [issues](https://github.com/113636xfh/pi-session-blackboard/issues) 反馈。
+> ⚠️ **真正的警告。** `"board"` 模式是拿摘要**质量**换成本和确定性：LLM 摘要会重新
+> 叙事、留住语气和没成形的推理，板子只回放提交上去的行——丢的是连接组织，不是事实。
+> 兜底在：pi 的保留尾部仍是逐字原文，被替换和被轮转的行都留在盘上，可以用
+> `blackboard_recall`（当前板 + `archive/` + 快照 digest）或 `/bb show` 回去读；板子
+> 太薄会自动退回原生摘要。默认 `compaction: "off"` 完全不碰 pi 的原生流程。
+> 核心路径有 54 项 smoke 覆盖，也已在真实会话里日常使用多日。欢迎在
+> [issues](https://github.com/113636xfh/pi-session-blackboard/issues) 反馈；
 > 用之前请先读[局限](#局限诚实版)。
 
 [![test](https://github.com/113636xfh/pi-session-blackboard/actions/workflows/test.yml/badge.svg)](https://github.com/113636xfh/pi-session-blackboard/actions/workflows/test.yml)
@@ -439,6 +443,11 @@ commit + supersedes + 轮转 + 指针上限、收编解析、倒计时数学、l
 
 ## 局限（诚实版）
 
+- **board 模式相对原生压缩是质量上的取舍。** LLM 摘要是重新叙事，板子只回放提交过
+  的行，所以丢的是连接组织——语气、保留余地、没成形的推理，以及任何没写下来的东西。
+  但没有东西被扔掉：pi 的保留尾部仍是逐字原文，被替换和被轮转的行都在盘上，
+  `blackboard_recall` / `/bb show` 可以让代理回去读。宁愿花那次模型调用就设
+  `compaction: "off"`（默认），pi 的原生摘要照旧。
 - **审校是 prompt 强制，不是硬保证。** 模型可以忽略 checkpoint。缓解：最多重注 3 次
   + 可见警告；下个用户回合重新触发。临近压缩的提醒不消耗这 3 次额度。
 - **助手文本挖掘（decisions/next/findings）故意轻且限量。** 它是审校的起点，不是
