@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" font-family="'Noto Sans CJK SC','Noto Sans',sans-serif">
+  <rect x="0" y="0" width="1280" height="360" fill="#ffffff"/>
+
+  <text x="640" y="52" font-size="26" font-weight="bold" fill="#1a202c" text-anchor="middle">The per-turn curation loop</text>
+  <text x="640" y="86" font-size="15" fill="#5a6a80" text-anchor="middle">Deterministic extraction, then the agent's own review — the only LLM step is the agent's turn</text>
+
+  <!-- node 1: turn settled (gray, harness) -->
+  <rect x="30" y="140" width="260" height="88" rx="10" fill="#f7f9fb" stroke="#94a3b8" stroke-width="2"/>
+  <text x="160" y="170" font-size="20" font-weight="bold" fill="#2d3748" text-anchor="middle">Turn settled</text>
+  <text x="160" y="198" font-size="15" fill="#5a6a80" text-anchor="middle">after each user turn</text>
+
+  <!-- node 2: deterministic extraction (green) -->
+  <rect x="350" y="140" width="260" height="88" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
+  <text x="480" y="170" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">Deterministic extract</text>
+  <text x="480" y="198" font-size="15" fill="#5a6a80" text-anchor="middle">new entries only · no LLM</text>
+
+  <!-- node 3: checkpoint draft (green) -->
+  <rect x="670" y="140" width="260" height="88" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
+  <text x="800" y="170" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">Checkpoint draft</text>
+  <text x="800" y="198" font-size="15" fill="#5a6a80" text-anchor="middle">rides your next prompt</text>
+
+  <!-- node 4: agent curation (orange = the only LLM step) -->
+  <rect x="990" y="140" width="260" height="88" rx="10" fill="#fdeacc" stroke="#e8850c" stroke-width="2"/>
+  <text x="1120" y="170" font-size="20" font-weight="bold" fill="#9a4d00" text-anchor="middle">Agent curates</text>
+  <text x="1120" y="198" font-size="15" fill="#5a6a80" text-anchor="middle">commit · supersedes · skip</text>
+
+  <!-- forward arrows: edge center to edge center, mid-height y=184 -->
+  <line x1="290" y1="184" x2="336" y2="184" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="336,176 336,192 350,184" fill="#718096"/>
+  <line x1="610" y1="184" x2="656" y2="184" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="656,176 656,192 670,184" fill="#718096"/>
+  <line x1="930" y1="184" x2="976" y2="184" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="976,176 976,192 990,184" fill="#718096"/>
+
+  <!-- loop return: node 4 bottom center -> node 1 bottom center (dashed) -->
+  <path d="M 1120,228 L 1120,300 L 160,300 L 160,242" fill="none" stroke="#94a3b8" stroke-width="2" stroke-dasharray="7 5"/>
+  <polygon points="152,242 168,242 160,228" fill="#94a3b8"/>
+  <text x="640" y="330" font-size="15" fill="#5a6a80" text-anchor="middle">commit writes board.md (overflow rotates into archive/); the next turn scans only new entries</text>
+</svg>
