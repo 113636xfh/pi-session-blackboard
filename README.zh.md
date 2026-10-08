@@ -56,17 +56,36 @@ pi 的原生压缩会调用摘要模型，把旧历史压成一段文本。两�
 
 ## 安装
 
+最短路径——pi 自己 clone 到 `~/.pi/agent/git/github.com/113636xfh/…`，并把条目写进
+`~/.pi/agent/settings.json`：
+
 ```bash
-pi install /path/to/pi-session-blackboard     # 用户级；-l 为项目级
+pi install git:github.com/113636xfh/pi-session-blackboard    # 用户级；-l 为项目级
 # 重启 pi —— 扩展在进程启动时加载
 ```
+
+想钉住版本就在末尾加 `@<tag 或 sha>`：`pi update --extensions` 会把已有 clone 对齐到
+配置的 ref，但不会把钉住的 ref 往前挪。
+
+要读源码或改代码，就先 clone，再装本地路径：
+
+```bash
+git clone https://github.com/113636xfh/pi-session-blackboard.git
+pi install ./pi-session-blackboard      # pi 直接加载 src/index.ts —— 不需要 build
+```
+
+`npm install && npm test`（typecheck + 54 项 smoke）只在开发时需要。扩展是 TypeScript，
+由 pi 自己的扩展加载器加载，而 `@earendil-works/pi-coding-agent`、`typebox` 会被 alias
+到 pi 已安装的副本（`dist/core/extensions/loader.js` → `getAliases()`）——所以本包
+**没有运行时依赖**。
 
 移除：`pi remove <pi list 显示的名字>`。
 
 如果在 `settings.json` 的 `packages` 里引用本包，必须用**裸字符串**形式：
 
 ```jsonc
-{ "packages": ["../../pi-session-blackboard"] }        // ✅
+{ "packages": ["git:github.com/113636xfh/pi-session-blackboard"] }   // ✅
+{ "packages": ["../../pi-session-blackboard"] }                      // ✅ 本地路径
 { "packages": [{ "path": "../../pi-session-blackboard", "extensions": [] }] }  // ❌ 会禁用该包全部扩展
 ```
 

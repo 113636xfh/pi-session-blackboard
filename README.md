@@ -63,10 +63,30 @@ renders that file.
 
 ## Install
 
+Shortest path — pi clones the repo into `~/.pi/agent/git/github.com/113636xfh/…`
+and writes the entry into `~/.pi/agent/settings.json` itself:
+
 ```bash
-pi install /path/to/pi-session-blackboard     # user-level; -l for project-level
+pi install git:github.com/113636xfh/pi-session-blackboard    # user-level; -l for project-level
 # restart pi — extensions load at process start
 ```
+
+Pin it if you want it frozen: `…/pi-session-blackboard@<tag-or-sha>`. `pi update
+--extensions` reconciles an existing clone to the configured ref but does not
+move a pinned one.
+
+To read or hack on the source, clone it first and install the local path:
+
+```bash
+git clone https://github.com/113636xfh/pi-session-blackboard.git
+pi install ./pi-session-blackboard      # pi loads src/index.ts directly — no build step
+```
+
+`npm install && npm test` (typecheck + a 54-check smoke suite) is only needed
+for development. The extension is TypeScript loaded by pi's own extension
+loader, and `@earendil-works/pi-coding-agent` / `typebox` are aliased to pi's
+installed copies (`dist/core/extensions/loader.js` → `getAliases()`) — which is
+why this package declares **no runtime dependencies**.
 
 Remove with `pi remove <name-as-shown-by-pi-list>`.
 
@@ -74,7 +94,8 @@ If you reference the package from `settings.json` → `packages`, use the **bare
 string** form:
 
 ```jsonc
-{ "packages": ["../../pi-session-blackboard"] }        // ✅
+{ "packages": ["git:github.com/113636xfh/pi-session-blackboard"] }   // ✅
+{ "packages": ["../../pi-session-blackboard"] }                      // ✅ local path
 { "packages": [{ "path": "../../pi-session-blackboard", "extensions": [] }] }  // ❌ disables every extension in it
 ```
 
