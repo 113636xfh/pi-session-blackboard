@@ -18,8 +18,6 @@ export type SbbConfig = {
 	delivery: "next-turn" | "immediate";
 	/** per-section entry budget before deterministic archival kicks in. */
 	maxEntriesPerSection: number;
-	/** hard guard for total board lines (warns only in v0.1). */
-	maxBoardLines: number;
 	/** board directory; defaults to <agentDir>/blackboard. Absolute or agent-dir-relative. */
 	boardDir: string;
 	/** mirror a compact board digest into the session JSONL on commit (searchable later). */
@@ -58,6 +56,13 @@ export type SbbConfig = {
 	/** max draft lines rendered into a checkpoint message. */
 	maxDraftLines: number;
 	/**
+	 * How many pre-existing entries per section a `commit` echoes back next to
+	 * the entries that just landed (0 = only the new ones). The receipt used to
+	 * return the whole board; this is the budget for its context tail. The full
+	 * board is always one `action="show"` (or one `read`) away.
+	 */
+	commitContextEntries: number;
+	/**
 	 * "Near compaction" zone, in tokens left until pi's own compaction trigger
 	 * (`contextTokens > contextWindow - reserveTokens`). Inside the zone the
 	 * checkpoint message carries a live token countdown and is injected EVERY
@@ -76,7 +81,6 @@ export const DEFAULTS: SbbConfig = {
 	checkpointTurns: 1,
 	delivery: "next-turn",
 	maxEntriesPerSection: 40,
-	maxBoardLines: 400,
 	boardDir: join(getAgentDir(), "blackboard"),
 	mirrorToSession: true,
 	compaction: "off",
@@ -85,6 +89,7 @@ export const DEFAULTS: SbbConfig = {
 	summaryMaxChars: 6000,
 	maxEntryChars: 300,
 	maxDraftLines: 60,
+	commitContextEntries: 2,
 	seedFromPriorSummary: true,
 	compactionWarnTokens: 32768,
 	debugLog: false,
@@ -243,9 +248,9 @@ export function loadConfig(cwd: string): SbbConfig {
 	cfg.checkpointTurns = Math.max(1, Math.floor(pickNum(all, "checkpointTurns", cfg.checkpointTurns)));
 	cfg.delivery = pickStr(all, "delivery", cfg.delivery) === "immediate" ? "immediate" : "next-turn";
 	cfg.maxEntriesPerSection = Math.max(5, Math.floor(pickNum(all, "maxEntriesPerSection", cfg.maxEntriesPerSection)));
-	cfg.maxBoardLines = Math.max(50, Math.floor(pickNum(all, "maxBoardLines", cfg.maxBoardLines)));
 	cfg.maxEntryChars = Math.max(100, Math.floor(pickNum(all, "maxEntryChars", cfg.maxEntryChars)));
 	cfg.maxDraftLines = Math.max(10, Math.floor(pickNum(all, "maxDraftLines", cfg.maxDraftLines)));
+	cfg.commitContextEntries = Math.max(0, Math.min(20, Math.floor(pickNum(all, "commitContextEntries", cfg.commitContextEntries))));
 	cfg.compactionWarnTokens = Math.max(0, Math.floor(pickNum(all, "compactionWarnTokens", cfg.compactionWarnTokens)));
 	cfg.seedFromPriorSummary = pickBool(all, "seedFromPriorSummary", cfg.seedFromPriorSummary);
 	cfg.mirrorToSession = pickBool(all, "mirrorToSession", cfg.mirrorToSession);

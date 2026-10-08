@@ -18,9 +18,9 @@
  * Pure (no pi, no LLM, no fs) so the smoke suite can assert on it.
  */
 
-import type { Board } from "./types.js";
+import type { Board, Section } from "./types.js";
 import { SECTION_HEADERS, SECTIONS } from "./types.js";
-import { BOARD_SUMMARY_FLOOR, countAll } from "./board.js";
+import { BOARD_SUMMARY_FLOOR, countReal } from "./board.js";
 
 export const SUMMARY_DEFAULT_MAX_CHARS = 6000;
 
@@ -47,6 +47,11 @@ export interface SummaryOptions {
 	keptTailNote?: string;
 	/** Absolute path of the board file, for "read the rest" instructions. */
 	boardFile?: string;
+	/**
+	 * Directory holding the rotated archive files. Without it the footer points
+	 * only at the live board, so entries that were rotated out look gone.
+	 */
+	archiveDir?: string;
 	/** Name of the retrieval tool the model can use to search the board. */
 	recallTool?: string;
 }
@@ -99,13 +104,16 @@ export function renderSummary(board: Board, opts: SummaryOptions = {}): string |
 		body.push("", `## Archived (${board.sections.archived.length} older entries, not repeated here)`);
 	}
 
-	const counts = SECTIONS.map((s) => `${SECTION_HEADERS[s].toLowerCase()}:${board.sections[s].length}`).join(", ");
+	const counts = SECTIONS.map((s: Section) => `${SECTION_HEADERS[s].toLowerCase()}:${board.sections[s].filter((e) => !isPointer(e)).length}`).join(", ");
 	const footer: string[] = [
 		"",
 		"---",
-		`Blackboard: ${countAll(board)} entries (${counts}).`,
+		// Real entries only: pointer lines are bookkeeping, and counting them
+		// made the footer claim 60 entries when 5 facts were on the board.
+		`Blackboard: ${countReal(board)} entries (${counts}).`,
 		[
 			opts.boardFile ? `Full board (every entry, verbatim): ${opts.boardFile}.` : "",
+			opts.archiveDir ? `Rotated history: ${opts.archiveDir}.` : "",
 			`Use the \`${recallTool}\` tool to search older entries by keyword instead of re-reading this summary.`,
 		]
 			.filter(Boolean)

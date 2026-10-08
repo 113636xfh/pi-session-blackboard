@@ -13,3 +13,6 @@ Thumbs.db
 # machine-specific tsc configs (absolute paths into this box's installs)
 tsconfig.check.json
 tsconfig.build.json
+
+# local per-project agent state (never part of the package)
+.pi/

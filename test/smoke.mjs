@@ -10,7 +10,8 @@ import assert from "node:assert/strict";
 import { renderSummary, SUMMARY_MIN_ENTRIES } from "../build/summary.js";
 import { formatRecall, searchDigest, searchDocument } from "../build/recall.js";
 import { renderAssistSection } from "../build/compact-assist.js";
-import { commitEntries, mergeSummaryIntoBoard, parseSummarySections, readBoardFile, renderBoard } from "../build/board.js";
+import { commitEntries, mergeSummaryIntoBoard, parseSummarySections, readBoardFile, renderBoard, renderCommitEcho, MAX_POINTER_LINES } from "../build/board.js";
+import { extractAll } from "../build/extract.js";
 import { computePressure, describePressure, fmtTokens, resolveReserveFromSources, PI_DEFAULT_RESERVE_TOKENS, DEFAULTS } from "../build/config.js";
 import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -207,10 +208,129 @@ check("one commit batch can supersede several stale lines at once", () => {
 		{ section: "decisions", text: "use a byte-stable prefix", supersedes: "cache B" },
 	]);
 	assert.equal(r.committed, 2);
-	assert.equal(r.supersededFiles.length, 2, "each supersede writes its own archive file");
+	assert.equal(r.supersededFiles.length, 1, "one archive file for the whole batch");
 	assert.equal(r.supersedeMisses.length, 0);
 	const md = readFileSync(join(dir, `${sid}.md`), "utf8");
 	assert.ok(!md.includes("model A") && !md.includes("cache B"), "both stale lines gone");
+	const both = readFileSync(join(dir, ...norm(r.supersededFiles[0]).split("/")), "utf8");
+	assert.ok(both.includes("model A") && both.includes("cache B"), "both stale lines in that one file");
+	const after = readBoardFile(dir, sid);
+	assert.equal(after.sections.archived.filter((e) => e.text.startsWith("(archived)")).length, 1, "one pointer line for the batch");
+});
+
+
+// ── the board stays bounded: pointer lines are capped ─────────────────────
+
+check("rotation pointer lines are capped (the board cannot grow on bookkeeping)", () => {
+	const dir = tmpBoard();
+	const sid = "ptr-1";
+	const small = { maxEntriesPerSection: 5, maxEntryChars: 300 };
+	for (let i = 1; i <= 60; i++) commitEntries(dir, sid, small, [{ section: "files", text: `MODIFIED src/file${i}.ts (sym${i})` }]);
+	const b = readBoardFile(dir, sid);
+	const ptrs = b.sections.files.filter((e) => e.text.startsWith("(archived)"));
+	assert.ok(ptrs.length <= MAX_POINTER_LINES, `pointer lines grew to ${ptrs.length}`);
+	assert.equal(b.sections.files.filter((e) => !e.text.startsWith("(archived)")).length, 5, "facts kept: the newest 5");
+	// nothing is lost: the rotated facts are still on disk, in archive files
+	const files = readdirSync(join(dir, "archive", sid)).filter((f) => f.endsWith(".md"));
+	assert.ok(files.length > 10, `expected rotated archive files, got ${files.length}`);
+	const all = files.map((f) => readFileSync(join(dir, "archive", sid, f), "utf8")).join("\n");
+	assert.ok(all.includes("MODIFIED src/file1.ts"), "the oldest fact is still recallable from the archive");
+});
+
+check("counts shown to the model are real entries, not pointer bookkeeping", () => {
+	const dir = tmpBoard();
+	const sid = "ptr-2";
+	const small = { maxEntriesPerSection: 3, maxEntryChars: 300 };
+	for (let i = 1; i <= 12; i++) commitEntries(dir, sid, small, [{ section: "files", text: `MODIFIED src/f${i}.ts` }]);
+	commitEntries(dir, sid, small, [
+		{ section: "goal", text: "make compaction lossless" },
+		{ section: "next", text: "write the README" },
+	]);
+	const out = renderSummary(readBoardFile(dir, sid), { recallTool: "blackboard_recall", archiveDir: "/tmp/arc/sid" });
+	assert.ok(out, "board is dense enough");
+	assert.match(out, /Blackboard: 5 entries/, `pointer lines must not inflate the count:\n${out.slice(-300)}`);
+	assert.ok(out.includes("Rotated history: /tmp/arc/sid"), "the footer must point at the archive dir too");
+});
+
+
+// ── scope-change mining must not fire on ordinary follow-ups ───────────────
+
+check("ordinary follow-up task messages do not fabricate a [Scope change]", () => {
+	const users = [
+		"Refactor the compaction handler so the board is the summary",
+		"Fix these issues and add a regression test for the renderer",
+		"Now write the README and make sure the diagrams render",
+		"Update the config table with the new defaults",
+	].map((text, i) => ({ entryId: `u${i}`, text }));
+	const { draft } = extractAll({ users, assistants: [], tools: [] }, emptyBoard(), { goalExtracted: false });
+	assert.ok(draft.goal?.[0]?.startsWith("Refactor"), `opening goal expected: ${JSON.stringify(draft.goal)}`);
+	assert.ok(!draft.goal?.includes("[Scope change]"), `every turn became a scope change: ${JSON.stringify(draft.goal)}`);
+});
+
+check("explicit pivot language is still detected as a scope change", () => {
+	const users = [
+		"Refactor the compaction handler so the board is the summary",
+		"Actually, instead of a new renderer, switch to reusing the native one",
+	].map((text, i) => ({ entryId: `u${i}`, text }));
+	const { draft } = extractAll({ users, assistants: [], tools: [] }, emptyBoard(), { goalExtracted: false });
+	assert.ok(draft.goal?.includes("[Scope change]"), `pivot missed: ${JSON.stringify(draft.goal)}`);
+});
+
+
+// ── commit receipt: the new lines + their nearest older neighbours ────────
+// (the receipt used to re-render the whole board on every commit — the largest
+// recurring prompt cost of the extension, growing with the board)
+
+check("the receipt carries the new lines plus the 2 nearest older ones per section", () => {
+	const dir = tmpBoard();
+	const sid = "echo-1";
+	commitEntries(dir, sid, CFG, [
+		{ section: "decisions", text: "decision one" },
+		{ section: "decisions", text: "decision two" },
+		{ section: "decisions", text: "decision three" },
+		{ section: "next", text: "an untouched next step" },
+	]);
+	const r = commitEntries(dir, sid, CFG, [
+		{ section: "decisions", text: "decision four" },
+		{ section: "files", text: "MODIFIED src/board.ts" },
+	]);
+	const echo = renderCommitEcho(r.board, r.added, 2);
+	assert.ok(/^\+ \[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] decision four$/m.test(echo), `new line must be marked +:\n${echo}`);
+	assert.ok(echo.includes("decision three") && echo.includes("decision two"), `2 nearest older lines expected:\n${echo}`);
+	assert.ok(!echo.includes("decision one"), `older than the context window must not be echoed:\n${echo}`);
+	assert.ok(echo.includes("MODIFIED src/board.ts"), "a section with no older entries still appears");
+	assert.ok(!echo.includes("an untouched next step"), "sections without new entries are not echoed");
+	assert.ok(echo.indexOf("decision two") < echo.indexOf("decision four"), "newest last");
+	assert.ok(!echo.includes("# Session Blackboard"), "the receipt is not a board dump");
+});
+
+check("context 0 echoes only what landed; a pure duplicate echoes nothing", () => {
+	const dir = tmpBoard();
+	const sid = "echo-2";
+	commitEntries(dir, sid, CFG, [{ section: "goal", text: "the goal" }]);
+	const dup = commitEntries(dir, sid, CFG, [{ section: "goal", text: "THE goal" }]);
+	assert.equal(dup.committed, 0, "case-insensitive dedupe");
+	assert.equal(dup.added.length, 0, "nothing landed, so nothing to echo");
+	assert.equal(renderCommitEcho(dup.board, dup.added, 2), "");
+	const r = commitEntries(dir, sid, CFG, [{ section: "goal", text: "second goal line" }]);
+	const echo = renderCommitEcho(r.board, r.added, 0);
+	assert.ok(echo.includes("second goal line") && !echo.includes("] the goal"), echo);
+});
+
+check("a rotation pointer is never echoed as new or as context", () => {
+	const dir = tmpBoard();
+	const sid = "echo-3";
+	const small = { maxEntriesPerSection: 3, maxEntryChars: 300 };
+	for (let i = 1; i <= 4; i++) commitEntries(dir, sid, small, [{ section: "files", text: `file ${i}` }]);
+	const r = commitEntries(dir, sid, small, [{ section: "files", text: "file 5" }]);
+	const echo = renderCommitEcho(r.board, r.added, 2);
+	assert.ok(echo.includes("+ [") && echo.includes("file 5"), echo);
+	assert.ok(!echo.includes("(archived)"), `rotation pointer must not ride along:\n${echo}`);
+	assert.ok(echo.includes("file 3") && echo.includes("file 4"), `nearest older facts expected:\n${echo}`);
+});
+
+check("the receipt context budget is configurable and defaults to 2", () => {
+	assert.equal(DEFAULTS.commitContextEntries, 2);
 });
 
 

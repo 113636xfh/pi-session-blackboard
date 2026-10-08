@@ -368,7 +368,36 @@ export function readBoardFile(boardDir: string, sessionId: string): Board {
 	}
 }
 
+/**
+ * Pointer lines (`(archived) … → archive/…`) are extension bookkeeping, not
+ * facts. They used to accumulate forever — measured: 60 commits with a
+ * per-section budget of 5 left 55 pointer lines and 4.7 KB in ONE section,
+ * the only unbounded part of the design. Dropping the oldest pointers loses
+ * nothing: the archive files stay on disk and `blackboard_recall` greps the
+ * archive directory, so a pointer is a convenience, not the index.
+ */
+export const MAX_POINTER_LINES = 5;
+
+/** Keep only the newest `keep` pointer lines per section (in place). */
+export function capPointerLines(b: Board, keep: number = MAX_POINTER_LINES): number {
+	let dropped = 0;
+	for (const s of SECTIONS) {
+		const arr = b.sections[s];
+		const pointers = arr.filter((e) => e.text.startsWith("(archived)"));
+		if (pointers.length <= keep) continue;
+		const drop = new Set(pointers.slice(0, pointers.length - keep));
+		for (let i = arr.length - 1; i >= 0; i--) {
+			if (drop.has(arr[i])) {
+				arr.splice(i, 1);
+				dropped++;
+			}
+		}
+	}
+	return dropped;
+}
+
 export function writeBoard(boardDir: string, sessionId: string, b: Board): void {
+	capPointerLines(b);
 	const p = boardPath(boardDir, sessionId);
 	mkdirSync(dirname(p), { recursive: true });
 	writeFileSync(p, renderBoard(b), "utf-8");
@@ -404,34 +433,36 @@ function writeArchiveFile(
 }
 
 /**
- * One archive file for a whole adoption, grouped by section.
+ * One archive file for a whole batch (an adoption, or every supersedes in one
+ * commit), grouped by section.
  *
  * writeArchiveFile is per-overflow, so adopting ~240 parsed lines through the
- * normal commit path produced 200+ one-line archive files (measured). Adoption
- * drops its own overflow up front and writes a single file instead.
+ * normal commit path produced 200+ one-line archive files (measured), and a
+ * commit with 5 supersedes wrote 5 more. One immutable file per batch instead.
  */
-function writeAdoptionArchive(
+function writeGroupedArchive(
 	boardDir: string,
 	sessionId: string,
-	dropped: { section: Section; text: string }[],
+	prefix: string,
+	note: string,
+	items: { section: Section; ts: string; text: string }[],
 ): string | null {
-	if (dropped.length === 0) return null;
+	if (items.length === 0) return null;
 	const dir = archiveDir(boardDir, sessionId);
 	mkdirSync(dir, { recursive: true });
-	const name = `adopted-${nowStamp()}.md`;
-	const ts = nowLocal();
+	const name = `${prefix}-${nowStamp()}.md`;
 	const lines: string[] = [
 		`# Blackboard archive — session ${safeSid(sessionId)}`,
-		`<!-- written: ${new Date().toISOString()} | from: adopted prior compaction summary -->`,
+		`<!-- written: ${new Date().toISOString()} | from: ${note} -->`,
 		"",
 	];
-	let current: Section | null = null;
-	for (const d of dropped) {
-		if (d.section !== current) {
-			current = d.section;
-			lines.push(`## From: ${SECTION_HEADERS[d.section]}`);
-		}
-		lines.push(`- [${ts}] ${d.text}`);
+	// Group by section in board order, keeping the items' own order inside a
+	// section (so a batch reads the way it was committed).
+	for (const s of SECTIONS) {
+		const group = items.filter((d) => d.section === s);
+		if (!group.length) continue;
+		lines.push(`## From: ${SECTION_HEADERS[s]}`);
+		for (const d of group) lines.push(`- [${d.ts}] ${d.text}`);
 	}
 	lines.push("");
 	const p = join(dir, name);
@@ -439,6 +470,21 @@ function writeAdoptionArchive(
 	writeFileSync(tmp, lines.join("\n"), "utf-8");
 	renameSync(tmp, p);
 	return `archive/${safeSid(sessionId)}/${name}`;
+}
+
+function writeAdoptionArchive(
+	boardDir: string,
+	sessionId: string,
+	dropped: { section: Section; text: string }[],
+): string | null {
+	const ts = nowLocal();
+	return writeGroupedArchive(
+		boardDir,
+		sessionId,
+		"adopted",
+		"adopted prior compaction summary",
+		dropped.map((d) => ({ section: d.section, ts, text: d.text })),
+	);
 }
 
 export type CommitInput = {
@@ -461,6 +507,8 @@ export type CommitResult = {
 	supersededFiles: string[];
 	/** supersedes targets that matched nothing, or matched more than one entry. */
 	supersedeMisses: { target: string; reason: string }[];
+	/** The entries that actually landed (deduped/sanitized text), in commit order. */
+	added: { section: Section; text: string }[];
 };
 
 /** Single case-insensitive substring hit across every non-archived section. */
@@ -501,6 +549,8 @@ export function commitEntries(
 	const archivedFiles: string[] = [];
 	const supersededFiles: string[] = [];
 	const supersedeMisses: { target: string; reason: string }[] = [];
+	const added: { section: Section; text: string }[] = [];
+	const supersededEntries: { section: Section; ts: string; text: string }[] = [];
 	let committed = 0;
 	let deduped = 0;
 
@@ -516,12 +566,9 @@ export function commitEntries(
 			if (count === 1 && hit) {
 				const m = hit as { section: Section; idx: number; entry: BoardEntry };
 				const [removed] = board.sections[m.section].splice(m.idx, 1);
-				const rel = writeArchiveFile(boardDir, sessionId, m.section, [removed]);
-				supersededFiles.push(rel);
-				board.sections.archived.push({
-					ts,
-					text: `(archived) 1 ${SECTION_HEADERS[m.section]} entry superseded by a newer line → ${rel}`,
-				});
+				// Batched: every supersedes in this commit lands in ONE archive file
+				// (and produces ONE pointer line), written after the loop.
+				supersededEntries.push({ section: m.section, ts: removed.ts, text: removed.text });
 			} else if (count === 0) {
 				supersedeMisses.push({ target, reason: "no board entry contains this substring" });
 			} else {
@@ -537,6 +584,7 @@ export function commitEntries(
 		}
 		arr.push({ ts, text });
 		committed++;
+		added.push({ section: e.section, text });
 
 		if (e.section !== "archived") {
 			// Rotate overflow: real entries only. Pointer lines are never rotated —
@@ -563,9 +611,69 @@ export function commitEntries(
 		}
 	}
 
+	if (supersededEntries.length > 0) {
+		const rel = writeGroupedArchive(boardDir, sessionId, "superseded", "superseded by newer board lines", supersededEntries);
+		if (rel) {
+			supersededFiles.push(rel);
+			board.sections.archived.push({
+				ts,
+				text: `(archived) ${supersededEntries.length} ${supersededEntries.length === 1 ? "entry superseded by a newer line" : "entries superseded by newer lines"} → ${rel}`,
+			});
+		}
+	}
+
 	board.header.updated = ts;
 	writeBoard(boardDir, sessionId, board);
-	return { board, archivedFiles, committed, deduped, supersededFiles, supersedeMisses };
+	return { board, archivedFiles, committed, deduped, supersededFiles, supersedeMisses, added };
+}
+
+/**
+ * The commit receipt: the entries that just landed, plus the `context` entries
+ * sitting directly before them in the same section.
+ *
+ * The receipt used to re-render the WHOLE board (up to 4000 chars) on every
+ * commit — the largest recurring prompt cost of this extension, and it grew
+ * with the board. What the agent actually needs back is the new lines plus
+ * enough of their section tail to pick a `supersedes` substring, so that is
+ * what it gets. `action="show"`, `blackboard_recall` and the board file itself
+ * remain the way to see everything else.
+ *
+ * `+` marks what landed, ` ` is older context, newest last.
+ */
+export function renderCommitEcho(
+	board: Board,
+	added: { section: Section; text: string }[],
+	context: number,
+): string {
+	if (added.length === 0) return "";
+	const fresh = new Map<Section, Set<string>>();
+	for (const a of added) {
+		const set = fresh.get(a.section) ?? new Set<string>();
+		set.add(a.text);
+		fresh.set(a.section, set);
+	}
+	const lines: string[] = [];
+	for (const s of SECTIONS) {
+		if (s === "archived") continue;
+		const texts = fresh.get(s);
+		if (!texts || texts.size === 0) continue;
+		const arr = board.sections[s];
+		// Entries append, so the first new text's index is the start of this
+		// commit's block; everything before it is older board state. Rotation
+		// pointers are not facts — the archive files are reported separately.
+		let first = arr.length;
+		for (const t of texts) {
+			const i = arr.findIndex((e) => e.text === t);
+			if (i >= 0) first = Math.min(first, i);
+		}
+		const older = arr.slice(0, first).filter((e) => !e.text.startsWith("(archived)"));
+		lines.push("", `## ${SECTION_HEADERS[s]} — ${texts.size} new`);
+		for (const e of older.slice(Math.max(0, older.length - context))) lines.push(`  [${e.ts}] ${e.text}`);
+		// Only the landed lines: a rotation pointer pushed after them is reported
+		// separately as an archive file, not as a new entry.
+		for (const e of arr.slice(first)) if (texts.has(e.text)) lines.push(`+ [${e.ts}] ${e.text}`);
+	}
+	return lines.join("\n").trimStart();
 }
 
 /**
@@ -642,7 +750,8 @@ export function digest(board: Board, sessionId: string): Record<string, unknown>
 	const last = (n: number) => (arr: BoardEntry[]) => arr.slice(-n).map((e) => e.text);
 	const openIssues = board.sections.issues.filter((e) => !e.text.includes("[RESOLVED")).length;
 	const counts: Record<string, number> = {};
-	for (const s of SECTIONS) counts[s] = board.sections[s].length;
+	for (const s of SECTIONS)
+		counts[s] = s === "archived" ? board.sections[s].length : board.sections[s].filter((e) => !e.text.startsWith("(archived)")).length;
 	return {
 		v: 1,
 		at: new Date().toISOString(),

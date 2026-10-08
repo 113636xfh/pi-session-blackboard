@@ -99,8 +99,6 @@ export function normalizeBranch(entries: BranchEntry[]): NormalizedBlocks {
 
 const SCOPE_CHANGE_RE =
 	/\b(instead|actually|change of plan|forget that|new task|switch to|now I want|pivot|let'?s do|stop .* and)\b/i;
-const TASK_RE =
-	/\b(fix|implement|add|create|build|refactor|debug|investigate|update|remove|delete|migrate|deploy|test|write|set up)\b/i;
 const NOISE_SHORT_RE = /^(ok|yes|no|sure|yeah|yep|go|hi|hey|thx|thanks|y|n|k)\s*[.!?]*$/i;
 const NON_GOAL_RE =
 	/^\s*[\[│├└─╭╰]|```|^\s*(function |const |let |var |import |export |class )|^(https?:|file:|\/[A-Za-z])|\n/;
@@ -130,6 +128,13 @@ function goalLines(text: string): string[] {
  * keeping this robust across cursor loss / branch rescan where several user
  * blocks arrive in one window. vcc-style: the block that just became the
  * goal is never re-marked as a scope change.
+ *
+ * Tightened against pi-vcc's original rule, which also accepted "any user
+ * block containing a task verb": measured on 5 ordinary follow-up task
+ * messages ("Fix these issues and add a test", "Update the config table", …),
+ * 4 of 5 matched — i.e. nearly every turn fabricated a `[Scope change]` entry
+ * and the Goal section filled with non-goals. A scope change now requires
+ * explicit pivot language; the agent's review pass covers the rest.
  */
 export function extractGoal(users: UserBlock[], board: Board, state: SbbState): string[] {
 	const out: string[] = [];
@@ -140,7 +145,7 @@ export function extractGoal(users: UserBlock[], board: Board, state: SbbState): 
 	for (let i = scopeStartIdx; i < users.length; i++) {
 		const b = users[i];
 		const leading = b.text.slice(0, LEADING_CHARS);
-		if (SCOPE_CHANGE_RE.test(leading) || (TASK_RE.test(leading) && b.text.trim().length > 20)) {
+		if (SCOPE_CHANGE_RE.test(leading)) {
 			const lines = goalLines(b.text);
 			if (lines.length > 0) {
 				out.push("[Scope change]", ...lines.slice(0, 3));
@@ -378,7 +383,7 @@ const NEXT_RE = /\b(next (?:step|I|we|action|move)|TODO:|after (?:this|that),? (
 export function extractNext(assistants: AssistantBlock[], users: UserBlock[]): string[] {
 	const seen = new Set<string>();
 	const out: string[] = [];
-	const push = (raw: string, max: number) => {
+	const push = (raw: string) => {
 		const line = stripBullet(raw);
 		if (line.length < 15) return;
 		if (!NEXT_RE.test(line)) return;
@@ -388,10 +393,10 @@ export function extractNext(assistants: AssistantBlock[], users: UserBlock[]): s
 		seen.add(key);
 		out.push(c);
 	};
-	for (const b of assistants) for (const raw of b.text.split("\n")) push(raw, 3);
+	for (const b of assistants) for (const raw of b.text.split("\n")) push(raw);
 	if (out.length < 3) for (const b of users) for (const raw of b.text.split("\n")) {
 		if (out.length >= 3) break;
-		push(raw, 1);
+		push(raw);
 	}
 	return out.slice(0, 3);
 }

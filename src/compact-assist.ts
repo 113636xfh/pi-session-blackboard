@@ -21,7 +21,7 @@
 
 import type { Board } from "./types.js";
 import { SECTION_HEADERS, SECTIONS } from "./types.js";
-import { countAll } from "./board.js";
+import { countReal } from "./board.js";
 import { archiveDir, boardPath } from "./paths.js";
 
 /** Default hard cap (chars) for the assist section appended to a summary. */
@@ -72,7 +72,7 @@ export function renderAssistSection(
 	if (openIssues.length) lines.push("", "### Open Issues", ...openIssues.map(fmt));
 	if (files.length) lines.push("", "### Files Touched (newest last)", ...files.map(fmt));
 	if (next.length) lines.push("", "### Next Steps", ...next.map(fmt));
-	lines.push("", "### Board Stats", `entries: ${countAll(board)} (${counts.join(", ")})`);
+	lines.push("", "### Board Stats", `entries: ${countReal(board)} (${counts.join(", ")})`);
 
 	let out = lines.join("\n");
 	if (out.length > maxChars) {

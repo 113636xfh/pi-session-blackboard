@@ -23,7 +23,7 @@
  * its normal read tool at any time (e.g. after compaction).
  */
 
-import { appendFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { compact, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type, type TLiteral } from "typebox";
@@ -44,10 +44,12 @@ import {
 	archiveEntry,
 	commitEntries,
 	countAll,
+	countReal,
 	digest,
 	markResolved,
 	readBoardFile,
 	renderBoard,
+	renderCommitEcho,
 	resetAll,
 	mergeSummaryIntoBoard,
 	writeBoard,
@@ -70,6 +72,9 @@ const COMMIT_SECTIONS: Section[] = SECTIONS.filter((s) => s !== "archived");
 
 /** How long `/bb compact` keeps the native bypass armed before it expires. */
 const FORCE_NATIVE_TTL_MS = 5 * 60 * 1000;
+
+/** How many archive files one `blackboard_recall` reads (newest first). */
+const ARCHIVE_SCAN_MAX = 40;
 
 export default function sessionBlackboard(pi: ExtensionAPI) {
 	const sessions = new Map<string, { cfg: SbbConfig; sessionId: string; cwd: string }>();
@@ -586,6 +591,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 					maxChars: s.cfg.summaryMaxChars,
 					keptTailNote: keptNote,
 					boardFile: bp,
+					archiveDir: archiveDir(s.cfg.boardDir, s.sessionId),
 					recallTool: "blackboard_recall",
 				});
 				if (summary) {
@@ -669,6 +675,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 			"After exploration or experiments yield a non-obvious result (a measured behavior, a root cause, a gotcha), commit it under findings — one line with the exact command, number or error.",
 			'A fact that CHANGED goes on the new line with supersedes="<unique substring of the old line>" — the old line is archived in the same call, so the summary never carries both versions. Committing a correction WITHOUT supersedes leaves the stale line in place and makes the summary contradict itself.',
 			"After compaction or when resuming a session, call blackboard with action=\"show\" (or read the board file) to restore durable context, and use blackboard_recall to search older entries by keyword.",
+			"A commit echoes back only the entries that landed plus the few lines before each — it is NOT the whole board. When you need the full board use action=\"show\"; when you need an older fact use blackboard_recall.",
 		],
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("commit"), Type.Literal("skip"), Type.Literal("show"), Type.Literal("archive")], {
@@ -729,7 +736,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 									"), or action=\"skip\" to discard the pending draft.",
 							);
 						}
-						const { board, archivedFiles, committed, deduped, supersededFiles, supersedeMisses } = commitEntries(
+						const { board, archivedFiles, committed, deduped, supersededFiles, supersedeMisses, added } = commitEntries(
 							dir,
 							s.sessionId,
 							s.cfg,
@@ -750,10 +757,10 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 							superseded: supersededFiles.length,
 							supersedeMisses: supersedeMisses.length,
 						});
-						const parts: string[] = [`Committed ${committed} entries${deduped ? ` (${deduped} duplicates skipped)` : ""}. Blackboard v${st.boardVersion}.`];
+						const parts: string[] = [`Committed ${committed} ${committed === 1 ? "entry" : "entries"}${deduped ? ` (${deduped} duplicate${deduped === 1 ? "" : "s"} skipped)` : ""}. Blackboard v${st.boardVersion}.`];
 						if (supersededFiles.length > 0) {
 							parts.push(
-								`Superseded ${supersededFiles.length} stale entries → archived to ${supersededFiles.join(", ")} (still searchable via blackboard_recall).`,
+								`Replaced entries archived → ${supersededFiles.join(", ")} (still searchable via blackboard_recall).`,
 							);
 						}
 						if (supersedeMisses.length > 0) {
@@ -764,7 +771,17 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 							);
 						}
 						if (archivedFiles.length > 0) parts.push(`Rotated overflow to: ${archivedFiles.join(", ")}`);
-						parts.push(renderBoard(board).slice(0, 4000));
+						// Receipt, not a board dump: the new lines (`+`) plus the
+						// `commitContextEntries` lines before each — enough to pick the next
+						// `supersedes` substring without re-paying for the whole board every
+						// commit. Everything else is one `show` / `blackboard_recall` away.
+						const echo = renderCommitEcho(board, added, s.cfg.commitContextEntries);
+						if (echo) {
+							parts.push(
+								`Board after commit — your entries (+), each preceded by its ${s.cfg.commitContextEntries} nearest older entries:\n${echo}`,
+							);
+							parts.push(`Full board: ${boardPath(dir, s.sessionId)} — use action="show" or blackboard_recall, do not re-read the file.`);
+						}
 						return text(parts.join("\n\n"));
 					}
 					case "skip": {
@@ -969,7 +986,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 				const pr = pressureOf(s, ctx);
 				const lines: string[] = [
 					`blackboard: ${boardPath(dir, s.sessionId)}`,
-					`v${st.boardVersion} | updated: ${board.header.updated ?? "never"} | entries: ${countAll(board)} | turns since checkpoint: ${st.turnsSinceCheckpoint} | pending draft: ${
+					`v${st.boardVersion} | updated: ${board.header.updated ?? "never"} | entries: ${countReal(board)} (+${countAll(board) - countReal(board)} archive pointers) | turns since checkpoint: ${st.turnsSinceCheckpoint} | pending draft: ${
 						st.pendingDraft ? `${countDraftLines(st.pendingDraft.sections)} lines` : "none"
 					}`,
 					`compaction: ${s.cfg.compaction}${pr && pr.remaining !== null ? ` | ${fmtTokens(pr.remaining)} tokens left until pi's native trigger` : ""}`,
@@ -1003,6 +1020,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 			"Prefer blackboard_recall over re-reading the summary when you need a specific earlier fact (a path, an error, a decision that is not in the summary).",
 			"Search with a literal substring copied from the conversation, not a paraphrase.",
 			"Results are one line per match, tagged with where it came from (board · Section, archive/<file> · From: Section, snapshot/<i>@hh-mm-ss · Section) — grep again with a longer substring to narrow, or pass full=true only when you need to restore a whole board state.",
+			"Archive files are searched newest first (up to 40 of them); if the result says the scan was capped, narrow the query instead of raising the limit.",
 		],
 		parameters: Type.Object({
 			query: Type.String({ description: "substring to find (case-insensitive), e.g. a file path, function name or error text" }),
@@ -1032,12 +1050,22 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 					/* no board file yet */
 				}
 				// rotated archive
+				let archiveNote = "";
 				if (hits.length < limit) {
 					try {
 						const ad = archiveDir(s.cfg.boardDir, s.sessionId);
-						for (const f of readdirSync(ad).filter((n) => n.endsWith(".md")).sort()) {
+						// Newest first, and at most ARCHIVE_SCAN_MAX files: rotation writes one
+						// file per overflow (measured: 55 files after 60 commits), so reading
+						// the whole directory per query gets slower the longer the session runs.
+						const files = readdirSync(ad)
+							.filter((n) => n.endsWith(".md"))
+							.map((n) => ({ n, m: statSync(join(ad, n)).mtimeMs }))
+							.sort((a, b) => b.m - a.m);
+						if (files.length > ARCHIVE_SCAN_MAX)
+							archiveNote = `\n(archive: searched the ${ARCHIVE_SCAN_MAX} newest of ${files.length} files — narrow the query or grep ${ad})`;
+						for (const f of files.slice(0, ARCHIVE_SCAN_MAX)) {
 							if (hits.length >= limit) break;
-							hits.push(...searchDocument(readFileSync(join(ad, f), "utf-8"), query, limit - hits.length, `archive/${f}`));
+							hits.push(...searchDocument(readFileSync(join(ad, f.n), "utf-8"), query, limit - hits.length, `archive/${f.n}`));
 						}
 					} catch {
 						/* no archive */
@@ -1064,7 +1092,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 					}
 				}
 				debug(s, { event: "recall", query, hits: hits.length });
-				return text(formatRecall(hits, query));
+				return text(formatRecall(hits, query) + archiveNote);
 			} catch (err) {
 				return text(`blackboard_recall failed: ${err instanceof Error ? err.message : String(err)}`);
 			}

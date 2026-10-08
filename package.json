@@ -1,9 +1,33 @@
 {
   "name": "pi-session-blackboard",
-  "version": "0.1.0",
-  "description": "Session-level blackboard for pi coding agent: deterministic per-turn extraction, agent-curated commits, deterministic archival. Zero background LLM calls.",
+  "version": "0.2.0",
+  "description": "Session blackboard for the pi coding agent: deterministic per-turn extraction, agent-curated commits, deterministic archival — and the board itself becomes the compaction summary, so compaction costs zero summarization calls.",
   "type": "module",
   "license": "MIT",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "compaction",
+    "context-management",
+    "session-memory",
+    "coding-agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/113636xfh/pi-session-blackboard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/113636xfh/pi-session-blackboard/issues"
+  },
+  "homepage": "https://github.com/113636xfh/pi-session-blackboard#readme",
+  "files": [
+    "src",
+    "README.md",
+    "README.zh.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "pi": {
     "extensions": [
       "./src/index.ts"
