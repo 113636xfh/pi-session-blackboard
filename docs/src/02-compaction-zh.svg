@@ -2,7 +2,7 @@
   <rect x="0" y="0" width="1280" height="720" fill="#ffffff"/>
 
   <text x="640" y="52" font-size="26" font-weight="bold" fill="#1a202c" text-anchor="middle">压缩接管：黑板即摘要</text>
-  <text x="640" y="86" font-size="15" fill="#5a6a80" text-anchor="middle">板厚时压缩是纯文件操作；板薄时回退原生流程，其摘要再被收编回板</text>
+  <text x="640" y="86" font-size="15" fill="#5a6a80" text-anchor="middle">黑板条目够多时压缩是纯文件操作；太少时回退原生流程，其摘要再被收编回黑板</text>
 
   <!-- trigger chip (gray) -->
   <rect x="270" y="116" width="300" height="44" rx="10" fill="#f7f9fb" stroke="#94a3b8" stroke-width="2"/>
@@ -13,7 +13,7 @@
 
   <!-- gate: is the board dense enough (green) -->
   <rect x="270" y="180" width="300" height="68" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
-  <text x="420" y="208" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">黑板够厚？</text>
+  <text x="420" y="208" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">黑板条目够多？</text>
   <text x="420" y="230" font-size="15" fill="#5a6a80" text-anchor="middle">≥ 3 条真实条目</text>
 
   <!-- yes: board renders the summary (green) -->
@@ -43,15 +43,15 @@
   <rect x="870" y="446" width="290" height="88" rx="10" fill="#fdeacc" stroke="#e8850c" stroke-width="2"/>
   <text x="1015" y="474" font-size="20" font-weight="bold" fill="#9a4d00" text-anchor="middle">原生流程照跑</text>
   <text x="1015" y="496" font-size="15" fill="#5a6a80" text-anchor="middle">摘要模型调用（唯一 LLM）</text>
-  <text x="1015" y="518" font-size="15" fill="#5a6a80" text-anchor="middle">板子太薄时的兜底</text>
+  <text x="1015" y="518" font-size="15" fill="#5a6a80" text-anchor="middle">黑板条目太少时的兜底</text>
 
   <!-- adopt the native summary back into the board (green) -->
   <line x1="1015" y1="534" x2="1015" y2="556" stroke="#718096" stroke-width="2.5"/>
   <polygon points="1007,556 1023,556 1015,570" fill="#718096"/>
 
   <rect x="870" y="570" width="290" height="68" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
-  <text x="1015" y="598" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">摘要收编回板</text>
-  <text x="1015" y="620" font-size="15" fill="#5a6a80" text-anchor="middle">分节落板 · 下次走黑板</text>
+  <text x="1015" y="598" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">摘要收编回黑板</text>
+  <text x="1015" y="620" font-size="15" fill="#5a6a80" text-anchor="middle">分节写入黑板 · 下次仍走黑板</text>
 
-  <text x="640" y="690" font-size="15" fill="#5a6a80" text-anchor="middle">板厚 → 压缩零模型调用；板薄 → 原生摘要被收编，下一次压缩又走黑板</text>
+  <text x="640" y="690" font-size="15" fill="#5a6a80" text-anchor="middle">条目够多 → 压缩零模型调用；太少 → 原生摘要被收编，下一次压缩又走黑板</text>
 </svg>
