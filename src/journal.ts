@@ -57,7 +57,9 @@ export function reduceEvent(previous: JournalProjection, event: JournalEvent): J
         const old = next.entries[change.entry.id];
         assert((old?.revision ?? 0) === change.expectedRevision, 'stale entry revision');
         assert(change.entry.revision === change.expectedRevision + 1, 'entry revision must advance once');
-        if (old) { assert(old.createdAt === change.entry.createdAt, 'creation time cannot change'); remember(old); }
+        if (old) { assert(old.createdAt === change.entry.createdAt, 'creation time cannot change');
+          // The previous version is historical: it was replaced, so it must not present itself as current.
+          remember({ ...old, validity: old.validity === 'active' ? 'superseded' : old.validity }); }
         next.entries[change.entry.id] = structuredClone(change.entry);
         break;
       }

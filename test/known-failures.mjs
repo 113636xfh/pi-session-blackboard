@@ -54,27 +54,25 @@ test('S4: native Progress preserves done/in-progress/blocked state', () => {
   assert(!parsed.some(item => item.section === 'decisions' && item.text.includes('<read-files>')));
 });
 
-test('S5 known gap: oldest fact among 55 archives is reachable, possibly through cursors', { todo: 'requires complete pageable recall' }, async t => {
+test('S5: the oldest fact among 55 legacy archives is reachable through cursors', async t => {
   const { tools, ctx, boardDir } = harness(t);
-  for (let i = 0; i <= fixture.archiveCount; i++) commitEntries(boardDir, 'synthetic', { maxEntriesPerSection: 1, maxEntryChars: 300 }, [
-    { section: 'decisions', text: i === 0 ? 'OLDEST_FACT_ZERO' : `RECENT_FACT_${i}` },
-  ]);
   const dir = join(boardDir, 'archive', 'synthetic');
-  const files = readdirSync(dir);
-  assert.equal(files.length, 55);
-  let sequence = 1;
-  for (const name of files) {
-    const path = join(dir, name);
-    const oldest = readFileSync(path, 'utf8').includes('OLDEST_FACT_ZERO');
-    const time = new Date(Date.UTC(2020, 0, 1) + (oldest ? 0 : sequence++) * 1000);
-    utimesSync(path, time, time);
+  mkdirSync(dir, { recursive: true });
+  for (let i = 0; i < fixture.archiveCount; i++) {
+    const name = `${String(i).padStart(3, '0')}-page.md`;
+    writeFileSync(join(dir, name), i === 0 ? '## From: Decisions\n- [2026-01-01 00:00] OLDEST_FACT_ZERO\n' : `## From: Decisions\n- [2026-01-01 00:00] RECENT_FACT_${i}\n`);
   }
-  let cursor, found = false;
-  for (let page = 0; page < 10; page++) {
-    const result = await tools.blackboard_recall.execute('recall', { query: 'OLDEST_FACT_ZERO', limit: 60, cursor }, undefined, undefined, ctx);
-    found ||= result.content.some(item => item.text?.includes('match(es)') && item.text.includes('OLDEST_FACT_ZERO'));
+  assert.equal(readdirSync(dir).length, fixture.archiveCount);
+  let cursor, found = false, pages = 0, complete = false;
+  for (; pages < 20; pages++) {
+    const result = await tools.blackboard_recall.execute('recall', { query: 'OLDEST_FACT_ZERO', limit: 5, ...(cursor ? { cursor } : {}) }, undefined, undefined, ctx);
+    const text = result.content[0].text;
+    found ||= text.includes('OLDEST_FACT_ZERO');
     cursor = result.details?.nextCursor;
+    complete = result.details?.complete === true;
     if (!cursor) break;
   }
-  assert(found, 'the data exists but the old runtime only scans the newest 40 archives');
+  assert(found, 'the oldest archive is reachable by paging, not unreachable behind a 40-file cap');
+  assert(complete, 'the scan reports completion instead of pretending the first page was global');
+  assert(pages > 1, 'bounded work per page still reaches everything');
 });

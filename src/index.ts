@@ -17,6 +17,7 @@ import { resolve } from 'node:path';
 import { replayBranch, toBoard, planCommit, newEvent, fingerprint, reduceEvent, nativeRequestFresh, type CommitInput } from './journal.js';
 import { commitWithCache, WriterLocks } from './storage.js';
 import { makeOffer, validateReview, validateSources, draftCandidates, sourceRefs, checkReadiness, repairHeadroom } from './coverage.js';
+import { searchPage, readLegacyArchives, buildIndex } from './retrieval.js';
 import { SECTIONS, type BranchEntry, type JournalChange, type JournalProjection, type PendingDraft } from './types.js';
 
 export const SUMMARY_GENERATOR = 'pi-session-blackboard';
@@ -128,12 +129,18 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
       case 'show': {
         if (params.id) {
           const entry = s.projection.entries[params.id];
-          if (!entry) throw new Error('No entry with this ID on the current branch');
+          if (!entry) throw new Error('No entry with this ID on the current branch (history mode searches earlier revisions)');
           return result(JSON.stringify(entry, null, 2), { entry, revision: s.projection.revision });
         }
-        const text = renderSnapshot(s.projection, s.manager.getLeafId?.() ?? s.branch.at(-1)?.id ?? '');
-        const legacy = !s.projection.eventIds.length && existsSync(boardPath(s.cfg.boardDir, s.sessionId));
-        return result(`${text}${legacy ? '\nLegacy board detected; unscoped and not accepted as current facts. Migration/review is required.' : ''}`, { revision: s.projection.revision });
+        const index = buildIndex(s.projection, params.history === true ? 'history' : 'current')
+          .filter(hit => !params.section || hit.section === params.section);
+        const offset = Math.max(0, Number(params.offset) || 0);
+        const limit = Math.max(1, Math.min(60, Number(params.limit) || 20));
+        const page = index.slice(offset, offset + limit);
+        const more = offset + page.length < index.length;
+        const body = page.map(hit => `${hit.id}@${hit.revision} [${String(hit.section)}${hit.validity !== 'active' ? `/${hit.validity}` : ''}${hit.taskState ? `/${hit.taskState}` : ''}] ${hit.text}`);
+        const legacy = !s.projection.eventIds.length && existsSync(boardPath(s.cfg.boardDir, s.sessionId)) ? ['', 'Legacy board file detected: legacy/unscoped, not current facts. Run /bb migrate for a dry run.'] : [];
+        return result([`Notes: ${index.length} item(s), showing ${offset + 1}-${offset + page.length}.`, ...body, more ? `more: action=show offset=${offset + page.length}${params.section ? ` section=${params.section}` : ''}` : 'end of list.', ...legacy].join('\n'), { revision: s.projection.revision, nextOffset: more ? offset + page.length : null });
       }
       case 'archive': {
         const entry = selected(s.projection, params.target ?? '');
@@ -165,6 +172,9 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
         validity: Type.Optional(Type.Union(['active', 'superseded', 'retracted'].map(value => Type.Literal(value)))),
       }))),
       target: Type.Optional(Type.String()), dropDraft: Type.Optional(Type.Array(Type.String())),
+      section: Type.Optional(Type.Union(SECTIONS.map(value => Type.Literal(value)))),
+      offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 60 })),
+      history: Type.Optional(Type.Boolean()),
       operationId: Type.Optional(Type.String()), id: Type.Optional(Type.String()), expectedRevision: Type.Optional(Type.Integer()),
       review: Type.Optional(Type.Object({ id: Type.String(), constraintsChecked: Type.Boolean(), executionChecked: Type.Boolean(), goalChecked: Type.Boolean() })),
     }),
@@ -179,15 +189,31 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
   });
   pi.registerTool({
     name: 'blackboard_recall', label: 'Blackboard Recall',
-    description: 'Literal search of current active notes on this branch; use IDs to distinguish revisions.',
-    parameters: Type.Object({ query: Type.String(), limit: Type.Optional(Type.Number()), full: Type.Optional(Type.Boolean()) }),
+    description: 'Literal search over current branch notes, historical versions, the current transcript, or legacy archives. Pageable with a stable cursor; an unmatched page never means "nothing exists".',
+    parameters: Type.Object({
+      query: Type.String(),
+      mode: Type.Optional(Type.Union(['current', 'history', 'session'].map(value => Type.Literal(value)), { description: 'current (default) shows only valid notes; history adds superseded/retracted versions; session searches this branch transcript' })),
+      limit: Type.Optional(Type.Number()),
+      cursor: Type.Optional(Type.String()),
+    }),
     execute: async (_id, params, _signal, _update, ctx) => {
       const s = get(ctx);
       if (!s.cfg.enabled) throw new Error('Blackboard disabled');
-      const query = params.query.trim().toLowerCase();
-      if (!query) throw new Error('Non-empty literal query required');
-      const hits = Object.values(s.projection.entries).filter(entry => entry.validity === 'active' && entry.text.toLowerCase().includes(query));
-      return { ...result(hits.length ? hits.map(entry => `${entry.id}@${entry.revision} [${entry.section}] ${entry.text}`).join('\n') : 'No current-branch active note matches. Legacy archives have not been searched.', { revision: s.projection.revision }), ...(dedicatedRepair(ctx) ? { terminate: true } : {}) };
+      const page = searchPage({
+        projection: s.projection, branch: s.branch, sessionProjection: s.manager.buildSessionProjection?.(),
+        query: params.query ?? '', mode: params.mode ?? 'current', limit: params.limit, cursorToken: params.cursor,
+        archives: readLegacyArchives(s.cfg.boardDir, s.sessionId),
+      });
+      const lines = page.hits.map(hit => `${hit.source} · ${String(hit.section)} · ${hit.id}@${hit.revision} [${hit.validity}${hit.taskState ? `/${hit.taskState}` : ''}] ${hit.text}`);
+      const verdict = page.hits.length
+        ? `${page.hits.length} match(es) on this page.`
+        : page.complete
+          ? 'No match in the searched range (all current-branch notes, history and legacy archives were scanned).'
+          : 'No match on this page — the scan is NOT finished; continue with the cursor before concluding anything.';
+      const footer = page.nextCursor
+        ? `more available: pass cursor="${page.nextCursor}" (archives ${page.scannedArchives} scanned this page, ${page.totalArchives} total).`
+        : 'scan complete.';
+      return { ...result([verdict, ...lines, footer].join('\n'), { nextCursor: page.nextCursor, complete: page.complete }), ...(dedicatedRepair(ctx) ? { terminate: true } : {}) };
     },
   });
   const pressure = (ctx: Ctx) => {
@@ -355,6 +381,15 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
   const logAttempt = (kind: string, data: Record<string, unknown>) => {
     try { pi.appendEntry('sbb-compaction', { kind, at: new Date().toISOString(), ...data }); } catch { /* diagnostics only */ }
   };
+  /** Diagnostics: counts, ids and reasons only — never raw message or tool bodies. */
+  const debugRecord = (ctx: Ctx, data: Record<string, unknown>) => {
+    const s = get(ctx);
+    if (!s.cfg.debugLog) return;
+    try {
+      pi.appendEntry('sbb-debug', { at: new Date().toISOString(), revision: s.projection.revision, generation: s.projection.generation,
+        entries: Object.keys(s.projection.entries).length, history: s.projection.history.length, ...data });
+    } catch { /* diagnostics only */ }
+  };
   const summaryFor = (s: ReturnType<typeof get>, maxChars = s.cfg.summaryMaxChars) => {
     const board = toBoard(s.projection);
     return renderSummary(board, {
@@ -406,6 +441,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
       const honoured = event.reason === 'manual' && typeof event.customInstructions === 'string' && event.customInstructions.trim()
         ? await assistedSummary(ctx, event, s) : null;
       logAttempt('takeover', { reason: event.reason, assisted: !!honoured, revision: s.projection.revision, generation: s.projection.generation, chars: (honoured ?? summary).length });
+      debugRecord(ctx, { event: 'takeover', reason: event.reason, chars: (honoured ?? summary).length, omitted: Object.values(s.projection.entries).filter(entry => entry.validity === 'active').length - (summary.match(/^- /gm) ?? []).length });
       return { compaction: {
         summary: honoured ?? summary,
         firstKeptEntryId: cut ?? s.branch.at(-1)?.id ?? '',
@@ -433,6 +469,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
           : 'no safe headroom for a repair turn';
     notify(ctx, `Native summary used (${event.reason}): ${why}. Still unresolved: ${problems.join('; ')}`, 'warning');
     logAttempt('native-fallback', { reason: event.reason, why, problems: problems.length });
+    debugRecord(ctx, { event: 'native-fallback', reason: event.reason, why, problems });
     return;
   });
   // A persisted compaction node is the only proof of success: it advances the generation and
@@ -480,6 +517,13 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
           const s = get(ctx);
           if (s.projection.repair) change(ctx, [{ type: 'repair', repair: { ...s.projection.repair, phase: 'exhausted' } }]);
           notify(ctx, 'Pending memory repair cancelled; no further repair requests will be sent until a compaction succeeds.');
+          return;
+        }
+        if (command === 'debug') {
+          const s = get(ctx);
+          const entries = s.branch.filter(entry => entry.type === 'custom' && (entry.customType === 'sbb-debug' || entry.customType === 'sbb-compaction'))
+            .slice(-30).map(entry => JSON.stringify(entry.data));
+          notify(ctx, entries.length ? entries.join('\n') : `no diagnostics recorded (debugLog=${s.cfg.debugLog})`);
           return;
         }
         if (command === 'export') {

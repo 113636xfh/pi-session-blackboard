@@ -412,6 +412,65 @@ test('disabled removes both tools from the model-visible set and stops injection
   assert(!h.active().includes('blackboard'), 'disabling again removes them');
 });
 
+test('recall pages with stable cursors, defaults to current facts and never fakes a global miss', async t => {
+  const h = harness(t);
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Original wording alpha' }] }, 'v1');
+  const shown = (await h.invoke({ action: 'show' })).content[0].text.split(String.fromCharCode(10));
+  const id = shown[1].split('@')[0];
+  const first = await h.invoke({ action: 'commit', entries: [{ id, expectedRevision: 1, text: 'Corrected wording beta' }] }, 'v2');
+  assert(first.details.ids.length === 1);
+  const current = await h.tools.blackboard_recall.execute('r', { query: 'wording' }, undefined, undefined, h.ctx);
+  assert(current.content[0].text.includes('beta') && !current.content[0].text.includes('alpha'), 'current mode hides replaced versions');
+  const history = await h.tools.blackboard_recall.execute('r', { query: 'wording', mode: 'history' }, undefined, undefined, h.ctx);
+  assert(history.content[0].text.includes('alpha') && history.content[0].text.includes('superseded'), 'history shows the replaced version and its state');
+  const miss = await h.tools.blackboard_recall.execute('r', { query: 'no-such-token' }, undefined, undefined, h.ctx);
+  assert.equal(miss.details.complete, true);
+  assert(miss.content[0].text.includes('No match in the searched range'));
+  await h.invoke({ action: 'commit', entries: [{ section: 'decisions', text: 'Second wording note' }, { section: 'findings', text: 'Third wording note' }] }, 'v2b');
+  const cursor = (await h.tools.blackboard_recall.execute('r', { query: 'wording', limit: 1 }, undefined, undefined, h.ctx)).details.nextCursor;
+  assert(cursor, 'a page that did not finish hands out a cursor');
+  await h.invoke({ action: 'commit', entries: [{ section: 'next', text: 'New work appears', taskState: 'todo' }] }, 'v3');
+  await assert.rejects(() => h.tools.blackboard_recall.execute('r', { query: 'wording', limit: 1, cursor }, undefined, undefined, h.ctx), /changed since this cursor/);
+});
+test('by-ID show returns the full entry with its sources; show pages by section', async t => {
+  const h = harness(t);
+  const made = await h.invoke({ action: 'commit', entries: [{ section: 'findings', text: 'Measured 3ms; not verified' }] });
+  const id = made.details.ids[0];
+  const detail = await h.invoke({ action: 'show', id });
+  const entry = JSON.parse(detail.content[0].text);
+  assert.equal(entry.id, id);
+  assert.equal(entry.epistemic, 'stated');
+  assert(Array.isArray(entry.sources));
+  for (let i = 0; i < 5; i++) await h.invoke({ action: 'commit', entries: [{ section: 'files', text: `MODIFIED src/f${i}.ts` }] });
+  const page = await h.invoke({ action: 'show', section: 'files', limit: 2 });
+  assert(page.content[0].text.includes('showing 1-2'));
+  assert(page.content[0].text.includes('action=show offset=2'));
+  const second = await h.invoke({ action: 'show', section: 'files', limit: 2, offset: 2 });
+  assert(!second.content[0].text.includes('src/f0.ts'));
+});
+test('session search stays on this branch and excludes own prompts and thinking', async t => {
+  const h = harness(t);
+  h.branch.push({ type: 'message', id: 'asst', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'SECRET_THOUGHT needle' }, { type: 'text', text: 'Visible answer needle' }] } });
+  h.branch.push({ type: 'custom_message', id: 'own', customType: 'sbb-review-needed', content: 'own prompt needle', display: false });
+  h.branch.push({ type: 'message', id: 'other-branch', message: { role: 'user', content: 'other branch needle' } });
+  const result = await h.tools.blackboard_recall.execute('r', { query: 'needle', mode: 'session' }, undefined, undefined, h.ctx);
+  const text = result.content[0].text;
+  assert(text.includes('Visible answer needle'));
+  assert(!text.includes('SECRET_THOUGHT'));
+  assert(!text.includes('own prompt needle'));
+});
+test('diagnostics record reasons and counts without raw content', async t => {
+  const h = harness(t); h.ctx.getContextUsage = () => ({ tokens: 1000, contextWindow: 64000 });
+  writeFileSync(join(h.cwd, '.pi/settings.json'), JSON.stringify({ 'session-blackboard': { boardDir: join(h.cwd, 'boards'), compaction: 'board', debugLog: true } }));
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Sensitive-but-unlogged note body' }, { section: 'next', text: 'Inspect', taskState: 'todo' }] });
+  h.branch.push({ type: 'message', id: 'unreviewed', message: { role: 'user', content: 'Raw user secret text' } });
+  await h.hooks.session_before_compact({ reason: 'threshold', preparation: { firstKeptEntryId: null, tokensBefore: 1 } }, h.ctx);
+  await h.commands.bb.handler('debug', h.ctx);
+  const dump = h.notices.at(-1)[0];
+  assert(dump.includes('"event":"native-fallback"') || dump.includes('deferred') || dump.includes('takeover'));
+  assert(!dump.includes('Raw user secret text') && !dump.includes('Sensitive-but-unlogged note body'));
+});
+
 test('cooperating writers cannot share a session lock, and release does not delete another owner', t => {
   const h = harness(t), a = new WriterLocks(), b = new WriterLocks();
   t.after(() => { a.release(); b.release(); });
