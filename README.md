@@ -234,6 +234,8 @@ called. CI runs Linux and Windows on Node 22.19.0 and 24.
 - Legacy archives are searchable but stay unscoped forever; nothing infers their
   branch.
 
+- [Contract: 0.2 → 0.3](docs/CONTRACT.md) and `npm run release:check` cover the release gate.
+
 ## License
 
 MIT.

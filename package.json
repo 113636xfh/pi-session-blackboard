@@ -50,6 +50,7 @@
     "test:sdk": "npm run build && node --test test/sdk-contract.mjs",
     "test:known": "npm run build && node --test test/known-failures.mjs",
     "docs:render": "node docs/render.mjs",
-    "test:all": "npm run typecheck && npm test && npm run test:known"
+    "test:all": "npm run typecheck && npm test && npm run test:known",
+    "release:check": "npm run typecheck && npm test && npm run test:known && npm pack --dry-run"
   }
 }

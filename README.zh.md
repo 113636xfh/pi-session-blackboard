@@ -204,6 +204,8 @@ npm run test:known  # 曾经的失败复现，保留作回归护栏
 - 不做跨进程合并，第二个写者会被拒绝。
 - 旧归档可以被检索，但永远是 unscoped；不会去推断它们属于哪条分支。
 
+- [契约差异：0.2 → 0.3](docs/CONTRACT.md)；`npm run release:check` 是一键本地检查入口。
+
 ## 许可
 
 MIT。
