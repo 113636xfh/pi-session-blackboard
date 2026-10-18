@@ -2,7 +2,7 @@
  * Deterministic compaction evaluation. Asserts on the *persisted* summary text, so it
  * measures the pipeline rather than a model's opinion of it. Runs offline by default.
  */
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
@@ -36,6 +36,10 @@ function notesFor(task, round) {
   return entries;
 }
 
+/** Written after every round so a killed process still leaves evidence. */
+function partialPath(armId, taskId, rounds) {
+  return resolve(`eval/results/partial-${armId}-${taskId}-${rounds}rounds.json`);
+}
 async function runArm(arm, task, rounds, modelSpec) {
   const dir = mkdtempSync(join(tmpdir(), `sbb-eval-${arm.id}-`));
   let session;
@@ -52,7 +56,8 @@ async function runArm(arm, task, rounds, modelSpec) {
     const [provId, modelId] = real ? modelSpec.split('/') : ['eval-offline', 'fixed'];
     const key = `${provId}/${modelId}`;
     const compaction = real
-      ? { enabled: true, modelOverrides: { [key]: { reserveTokens: 232144, keepRecentTokens: 6000 } } }
+      // The native arm has no notes to render, so it needs a small enough tail to have work to do.
+      ? { enabled: true, modelOverrides: { [key]: { reserveTokens: 232144, keepRecentTokens: arm.extension ? 6000 : 800 } } }
       : { enabled: true, reserveTokens: 600, keepRecentTokens: 700 };
     const settings = SettingsManager.inMemory({ compaction, retry: { enabled: false } });
     const runtime = real
@@ -119,9 +124,24 @@ async function runArm(arm, task, rounds, modelSpec) {
       model: runtime.getModel(provId, modelId), thinkingLevel: 'off', sessionManager: manager,
       settingsManager: settings, resourceLoader: loader });
     session = created.session;
+    // Bounded work per round: a slow local model that keeps calling tools must not eat the night.
+    let toolCallsThisRound = 0;
+    const maxToolCalls = Number(process.env.SBB_EVAL_MAX_TOOLS ?? 6);
+    session.subscribe(event => {
+      if (event.type !== 'tool_execution_start') return;
+      toolCallsThisRound += 1;
+      if (toolCallsThisRound > maxToolCalls) {
+        console.log(`  tool budget exceeded (${toolCallsThisRound}) -> aborting round`);
+        void session.abort().catch(() => {});
+      }
+    });
     const withTimeout = async (label, work) => {
       let timer;
-      const guard = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`timeout after ${promptTimeoutMs / 1000}s: ${label}`)), promptTimeoutMs); });
+      toolCallsThisRound = 0;
+      const guard = new Promise((_, reject) => { timer = setTimeout(() => {
+        void session.abort().catch(() => {});
+        reject(new Error(`timeout after ${promptTimeoutMs / 1000}s: ${label}`));
+      }, promptTimeoutMs); });
       try { return await Promise.race([work(), guard]); }
       finally { clearTimeout(timer); }
     };
@@ -130,15 +150,28 @@ async function runArm(arm, task, rounds, modelSpec) {
       if (process.env.SBB_EVAL_DEBUG && (event.type === 'compaction_end' || event.type === 'compaction_start')) console.error('EV', event.type, event.reason, event.errorMessage ?? '', event.aborted ?? '');
     });
     await session.bindExtensions({ mode: 'print', onError: error => errors.push(error) });
+    const partial = { arm: arm.id, task: task.id, rounds, model: modelSpec ?? 'in-process', startedAt: new Date().toISOString(), completedRounds: 0 };
+    writeFileSync(partialPath(arm.id, task.id, rounds), JSON.stringify(partial, null, 2));
     for (let round = 0; round <= rounds; round++) {
+      const step = task.steps[Math.min(round, task.steps.length - 1)];
       const prompt = real
-        ? `Round ${round}. Constraint in force: ${task.constraint}. Do this step: ${task.steps[Math.min(round, task.steps.length - 1)]}. Record it on the blackboard (goal, constraint, current state), then request a review credential and confirm it.`
+        ? arm.extension
+          ? `Round ${round}. Constraint in force: ${task.constraint}. Do this step: ${step}. Record it on the blackboard (goal, constraint, current state), then request a review credential and confirm it.`
+          // No notes tool in this arm: the same instruction, minus the tool we do not have.
+          : `Round ${round}. Constraint in force: ${task.constraint}. Do this step: ${step}. When done, state in one short sentence what you did and what is still open.`
         : script(task, round);
-      try { await withTimeout(`round ${round}`, () => session.prompt(prompt)); }
+      try {
+        await withTimeout(`round ${round}`, () => session.prompt(prompt));
+        partial.completedRounds = round + 1;
+        partial.compactions = manager.getBranch().filter(entry => entry.type === 'compaction').length;
+        writeFileSync(partialPath(arm.id, task.id, rounds), JSON.stringify(partial, null, 2));
+      }
       catch (error) {
         // A stuck or extremely slow round is data, not a crash: record it and stop this task.
-        return { arm: arm.id, task: task.id, status: 'timeout', reason: error instanceof Error ? error.message : String(error),
-          compactions: manager.getBranch().filter(entry => entry.type === 'compaction').length };
+        const row = { arm: arm.id, task: task.id, status: 'timeout', reason: error instanceof Error ? error.message : String(error),
+          compactions: manager.getBranch().filter(entry => entry.type === 'compaction').length, completedRounds: partial.completedRounds };
+        writeFileSync(partialPath(arm.id, task.id, rounds), JSON.stringify({ ...partial, ...row }, null, 2));
+        return row;
       }
       if (errors.length) return { arm: arm.id, task: task.id, status: 'error', reason: String(errors[0]) };
     }
@@ -148,8 +181,9 @@ async function runArm(arm, task, rounds, modelSpec) {
       try { await withTimeout('manual compaction', () => session.compact()); }
       catch (error) {
         const attempted = manager.getBranch().filter(entry => entry.type === 'compaction').length;
-        if (!attempted) return { arm: arm.id, task: task.id, status: 'compaction-failed', reason: error instanceof Error ? error.message : String(error),
-          compactions: 0, summaryCalls: 0, results: [], passed: false };
+        if (!attempted) return { arm: arm.id, task: task.id, status: 'skipped',
+          reason: `no compaction possible in this arm: ${error instanceof Error ? error.message : String(error)}`,
+          compactions: 0, summaryCalls: null, takeovers: 0, results: [], passed: null };
       }
     }
     const compactions = manager.getBranch().filter(entry => entry.type === 'compaction');
@@ -158,16 +192,17 @@ async function runArm(arm, task, rounds, modelSpec) {
       const ok = probe.mustContain ? summary.includes(probe.mustContain) : !summary.includes(probe.mustNotContain);
       return { ...probe, ok };
     });
-    const summaryCalls = calls.filter(call => call.summarizing).length;
-    const _unused = compactions.filter(entry => {
-      const details = entry.details ?? {};
-      return !(details.generator === 'pi-session-blackboard');
-    }).length;
+    const ours = compactions.filter(entry => entry.details?.generator === 'pi-session-blackboard').length;
+    const summaryCalls = real
+      // Only this extension stamps generator metadata; without it the arm's compactions are unattributable.
+      ? (arm.extension && ours === 0 ? null : compactions.length - ours)
+      : calls.filter(call => call.summarizing).length;
     return { arm: arm.id, task: task.id, status: 'ran', compactions: compactions.length, summaryChars: summary.length,
-      modelCalls: real ? null : calls.length, summaryCalls, results, passed: results.every(result => result.ok),
+      modelCalls: real ? null : calls.length, summaryCalls, takeovers: ours, results, passed: results.every(result => result.ok),
       summary: summary.slice(0, 2000) };
   } finally {
-    session?.dispose();
+    // The hard wall-clock bound is the parent process kill; dispose is best effort.
+    try { session?.dispose(); } catch { /* ignore */ }
     // Windows keeps handles open for a moment after dispose; cleanup must not fail the run.
     for (let attempt = 0; attempt < 5; attempt++) {
       try { rmSync(dir, { recursive: true, force: true }); break; }

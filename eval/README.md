@@ -117,3 +117,36 @@ tagged in the public repo). The default branch is pinned locally under
 `MemoryAgentBench` / `LongMemEval` are the next two datasets to wire once the
 adapter shape is proven. This is deliberate: the plan forbids publishing numbers
 that were not actually produced.
+
+## Long-run safety (measured 2026-10-18, local `strata` endpoint)
+
+Trial runs exposed three things that only show up on long tasks, all now fixed:
+
+1. **Unbounded tool loop.** The model keeps calling the notes tool round after
+   round, and every call is a full request on a slow local endpoint. A round that
+   should take seconds ran for 10+ minutes. Fixed with a per-round tool budget
+   (`SBB_EVAL_MAX_TOOLS`, default 6) that aborts the round.
+2. **In-process timeouts are not a real bound.** `session.abort()` does not
+   reliably cancel an in-flight request to a slow provider, so a per-round timer
+   alone let one task run 900 s. The hard bound is now the parent process kill in
+   `nightly.mjs` (`SIGKILL`, `perTaskMinutes + 2`).
+3. **A killed task left no evidence.** Each round now writes
+   `eval/results/partial-<arm>-<task>-<rounds>rounds.json`, so a killed run still
+   reports how far it got.
+
+Measured wall clock, real model, one task (`path-fidelity`), 2 rounds:
+
+| arm | status | compactions | takeovers | summarizer calls | probes | summary |
+|---|---|---|---|---|---|---|
+| `native` | ran | 1 | 0 | 1 | 3/3 | 3017 chars |
+| `board-prefix` (0.2) | skipped | 0 | 0 | — | — | *nothing to compact: 0.2 needs ≥3 committed entries* |
+| `board-fixed` | ran | 1 | **1** | **0** | 3/3 | 4176 chars |
+
+The whole 3-arm × 1-task × 2-round sweep took 953 s (native 248 s, prefix 186 s,
+fixed 519 s). A 4-round single task completed once with 1 compaction, 1 takeover,
+5198 chars, 3/3 probes — and before the tool budget existed, an equivalent 4-round
+run blew past 900 s with zero compactions.
+
+Still not verified: the full 4-task × 3-arm × 4-round matrix, manual-compaction
+takeover reliability, and any public benchmark. Those are why step 47 and the
+release gate stay open.
