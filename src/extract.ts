@@ -126,7 +126,6 @@ function goalLines(text: string): string[] {
 		if (NOISE_SHORT_RE.test(t)) continue;
 		if (NON_GOAL_RE.test(t)) continue;
 		out.push(clip(t, MAX_GOAL_CHARS));
-		if (out.length >= 6) break;
 	}
 	return out;
 }
@@ -158,8 +157,7 @@ export function extractGoal(users: UserBlock[], board: Board, state: SbbState): 
 		if (SCOPE_CHANGE_RE.test(leading)) {
 			const lines = goalLines(b.text);
 			if (lines.length > 0) {
-				out.push("[Scope change]", ...lines.slice(0, 3));
-				break;
+				out.push("[Scope change]", ...lines);
 			}
 		}
 	}
@@ -188,10 +186,9 @@ export function extractPrefs(users: UserBlock[], existing: string[]): string[] {
 			if (seen.has(c.toLowerCase())) continue;
 			seen.add(c.toLowerCase());
 			out.push(c);
-			break; // one per user block
 		}
 	}
-	return out.slice(0, 5);
+	return out;
 }
 
 /**
@@ -269,7 +266,6 @@ export function extractCommits(tools: ToolBlock[]): string[] {
 		const hash = m[1].slice(0, 10);
 		const subject = (t.output.split(m[1]).slice(1).join(" ").trim().split("\n")[0] ?? "").slice(0, 80);
 		out.push(`COMMIT ${hash} ${subject}`.trim());
-		if (out.length >= 4) break;
 	}
 	return out;
 }
@@ -317,7 +313,6 @@ export function extractIssues(tools: ToolBlock[]): string[] {
 		const line = pickErrorLine(t.output);
 		const cmd = (typeof t.args.command === "string" ? (t.args.command as string) : "").replace(/\s+/g, " ").slice(0, 80);
 		if (line) out.push(`[ERROR] ${cmd}: ${line}`.trim());
-		if (out.length >= 4) break;
 	}
 	return out;
 }
@@ -342,7 +337,6 @@ export function extractExperiments(tools: ToolBlock[]): string[] {
 		if (seen.has(c)) continue;
 		seen.add(c);
 		out.push(`RAN ${c}${t.isError ? " (failed)" : ""}`);
-		if (out.length >= 4) break;
 	}
 	return out;
 }
@@ -369,7 +363,7 @@ export function extractDecisions(assistants: AssistantBlock[]): string[] {
 			out.push(c);
 		}
 	}
-	return out.slice(0, 3);
+	return out;
 }
 
 /**
@@ -395,7 +389,7 @@ export function extractFindings(assistants: AssistantBlock[]): string[] {
 			out.push(c);
 		}
 	}
-	return out.slice(0, 4);
+	return out;
 }
 
 const NEXT_RE = /\b(next (?:step|I|we|action|move)|TODO:|after (?:this|that),? (?:we|I)|remaining (?:work|steps))\b/i;
@@ -414,11 +408,8 @@ export function extractNext(assistants: AssistantBlock[], users: UserBlock[]): s
 		out.push(c);
 	};
 	for (const b of assistants) for (const raw of b.text.split("\n")) push(raw);
-	if (out.length < 3) for (const b of users) for (const raw of b.text.split("\n")) {
-		if (out.length >= 3) break;
-		push(raw);
-	}
-	return out.slice(0, 3);
+	for (const b of users) for (const raw of b.text.split("\n")) push(raw);
+	return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -431,8 +422,6 @@ export type ExtractResult = {
 	/** experiment-like commands run in this window (reminder fodder). */
 	experiments: string[];
 };
-
-const PER_SECTION_CAP = 8;
 
 /**
  * Run all extractors over the NEW blocks of this turn. Pure function, no I/O,
@@ -450,12 +439,12 @@ export function extractAll(
 		if (lines.length === 0) return;
 		const fresh: string[] = [];
 		for (const l of lines) {
-			const k = l.toLowerCase();
+			const k = s === "files" ? l : l.toLowerCase();
 			if (globalSeen.has(k)) continue; // a line is filed under ONE section only
 			globalSeen.add(k);
 			fresh.push(l);
 		}
-		if (fresh.length > 0) draft[s] = [...(draft[s] ?? []), ...fresh].slice(0, PER_SECTION_CAP);
+		if (fresh.length > 0) draft[s] = [...(draft[s] ?? []), ...fresh];
 	};
 
 	const goalLines = extractGoal(blocks.users, board, state);

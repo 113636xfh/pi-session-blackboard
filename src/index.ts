@@ -290,6 +290,8 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 			any = true;
 			parts.push(`## ${s}`);
 			parts.push(...lines.slice(0, cfg.maxDraftLines).map((l) => `- ${l}`));
+			if (lines.length > cfg.maxDraftLines)
+				parts.push(`(${lines.length - cfg.maxDraftLines} more candidates retained in pending state; this preview is not the full review range.)`);
 		}
 		if (!any) parts.push(draft ? "(empty draft)" : "(no new deterministic entries this round)");
 		parts.push("--- end draft ---");
@@ -346,16 +348,18 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 				};
 				for (const [k, lines] of Object.entries(draft)) {
 					const sec = k as Section;
-					const existing = (pd.sections[sec] ?? []).map((x) => x.toLowerCase());
+					const key = (text: string) => sec === "files" ? text : text.toLowerCase();
+					const existing = new Set((pd.sections[sec] ?? []).map(key));
 					for (const l of lines) {
-						if (!existing.includes(l.toLowerCase())) {
+						if (!existing.has(key(l))) {
 							(pd.sections[sec] ??= []).push(l);
+							existing.add(key(l));
 						}
 					}
 				}
 				if (experiments.length > 0) {
 					const prev = pd.experiments ?? [];
-					pd.experiments = [...prev, ...experiments.filter((e) => !prev.includes(e))].slice(-8);
+					pd.experiments = [...prev, ...experiments.filter((e) => !prev.includes(e))];
 				}
 				pd.generatedAt = new Date().toISOString();
 				st.pendingDraft = pd;
