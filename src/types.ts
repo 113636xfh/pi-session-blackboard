@@ -94,12 +94,15 @@ export type BranchEntry = {
 		toolCallId?: string;
 		toolName?: string;
 		isError?: boolean;
+		details?: Record<string, unknown>;
+		nestedCalls?: { complete: boolean; calls: Array<{ id: string; name: string; arguments?: Record<string, unknown>; status: "ok" | "error" | "unfinished"; error?: string }> };
 	};
 	[k: string]: unknown;
 };
 
 export type UserBlock = { entryId: string; text: string };
 export type AssistantBlock = { entryId: string; text: string };
+export type ToolOutcome = "ok" | "error" | "cancelled" | "unfinished" | "unknown";
 export type ToolBlock = {
 	entryId: string;
 	callId: string;
@@ -107,6 +110,8 @@ export type ToolBlock = {
 	args: Record<string, unknown>;
 	output: string;
 	isError: boolean;
+	/** Explicit result status; missing result metadata must not imply success. */
+	status?: ToolOutcome;
 };
 
 export type NormalizedBlocks = {

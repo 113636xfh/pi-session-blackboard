@@ -78,14 +78,24 @@ export function normalizeBranch(entries: BranchEntry[]): NormalizedBlocks {
 			const callId = typeof m.toolCallId === "string" ? m.toolCallId : "";
 			const call = calls.get(callId);
 			const name = typeof m.toolName === "string" ? m.toolName : call?.name ?? "unknown";
+			const status = m.details?.cancelled === true ? "cancelled"
+				: m.details?.status === "unfinished" ? "unfinished"
+				: m.isError === true || (typeof m.details?.exitCode === "number" && m.details.exitCode !== 0) ? "error"
+				: m.isError === false ? "ok" : "unknown";
 			out.tools.push({
 				entryId: id,
 				callId,
 				name,
 				args: call?.args ?? {},
 				output: textOf(m.content).slice(0, 4000),
-				isError: m.isError === true,
+				isError: status === "error" || status === "cancelled",
+				status,
 			});
+			for (const nested of m.nestedCalls?.calls ?? []) {
+				const status = m.nestedCalls?.complete === true ? nested.status : "unknown";
+				out.tools.push({ entryId: id, callId: nested.id, name: nested.name,
+					args: nested.arguments ?? {}, output: nested.error ?? "", isError: status === "error", status });
+			}
 		}
 		// custom_message / compaction / session / model_change etc. are ignored:
 		// we never mine our own injected checkpoint messages.
@@ -217,11 +227,16 @@ function exportedSymbols(src: string): string[] {
 	return out;
 }
 
+export function toolOutcome(t: ToolBlock): NonNullable<ToolBlock["status"]> {
+	if (t.status && t.status !== "ok") return t.status;
+	return t.isError ? "error" : t.status ?? (t.isError === false ? "ok" : "unknown");
+}
+
 export function extractFiles(tools: ToolBlock[]): { lines: string[]; paths: Set<string> } {
 	const lines: string[] = [];
 	const paths = new Set<string>();
 	for (const t of tools) {
-		if (!FILE_TOOLS.has(t.name)) continue;
+		if (!FILE_TOOLS.has(t.name) || toolOutcome(t) !== "ok") continue;
 		const path =
 			typeof t.args.file_path === "string" ? t.args.file_path : typeof t.args.path === "string" ? (t.args.path as string) : "";
 		if (!path) continue;
@@ -246,7 +261,7 @@ export function extractFiles(tools: ToolBlock[]): { lines: string[]; paths: Set<
 export function extractCommits(tools: ToolBlock[]): string[] {
 	const out: string[] = [];
 	for (const t of tools) {
-		if (t.name !== "bash" || t.isError) continue;
+		if (t.name !== "bash" || toolOutcome(t) !== "ok") continue;
 		const cmd = typeof t.args.command === "string" ? (t.args.command as string) : "";
 		if (!/\bgit\s+commit\b/.test(cmd)) continue;
 		const m = t.output.match(/\[[^\]\n]*\]\s+([0-9a-f]{7,40})\b/) ?? t.output.match(/\b([0-9a-f]{40})\b/);
@@ -287,8 +302,13 @@ function pickErrorLine(out: string): string {
 export function extractIssues(tools: ToolBlock[]): string[] {
 	const out: string[] = [];
 	for (const t of tools) {
-		if (t.name !== "bash" && t.name !== "run") continue;
-		let failed = t.isError;
+		const outcome = toolOutcome(t);
+		if (outcome === "cancelled" || outcome === "unfinished" || outcome === "unknown") {
+			const target = t.args.path ?? t.args.file_path ?? t.args.command ?? t.callId;
+			out.push(`[${outcome.toUpperCase()}] ${t.name} ${String(target)}`);
+			continue;
+		}
+		let failed = outcome === "error";
 		if (!failed) {
 			const em = t.output.match(/exit(?:ed)? with (?:code|status) (\d+)/i);
 			failed = !!em && em[1] !== "0";
