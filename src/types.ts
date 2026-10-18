@@ -27,7 +27,7 @@ export const SECTION_HEADERS: Record<Section, string> = {
 };
 
 /** One board entry (a single line in the markdown file). */
-export type BoardEntry = { ts: string; text: string };
+export type BoardEntry = { ts: string; text: string; /** Stable event order when available (legacy boards may lack it). */ order?: number };
 
 /**
  * Parsed blackboard. `extra` preserves unknown `## ...` sections verbatim so

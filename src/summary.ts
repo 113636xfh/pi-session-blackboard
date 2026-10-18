@@ -1,140 +1,82 @@
-/**
- * The blackboard IS the compaction summary.
- *
- * pi's native compaction calls a model to summarize the replaced messages.
- * This file produces that summary deterministically from the board instead:
- * the entries the agent reviewed and committed every `checkpointTurns` turns
- * ARE the memory, so the summary is just those entries rendered in pi's
- * native section shape (Goal / Decisions / Progress / Next Steps / …).
- *
- * Consequences, all deliberate:
- *  - zero summarization model calls (the win: pi's own call is skipped, not
- *    duplicated — see index.ts `session_before_compact`);
- *  - the quality of the summary is the quality of the board, which is why the
- *    checkpoint prompt tells the agent its entries become this summary;
- *  - a thin board must NOT become a thin summary: `renderSummary` returns null
- *    below a floor and the handler then leaves the native flow untouched.
- *
- * Pure (no pi, no LLM, no fs) so the smoke suite can assert on it.
- */
-
-import type { Board, Section } from "./types.js";
+/** Deterministic, whole-entry summary selection. Selection precedes section layout. */
+import type { Board, BoardEntry, Section } from "./types.js";
 import { SECTION_HEADERS, SECTIONS } from "./types.js";
 import { BOARD_SUMMARY_FLOOR, countReal } from "./board.js";
 
 export const SUMMARY_DEFAULT_MAX_CHARS = 6000;
-
-/** Below this many real entries the board is not trusted as a summary. */
 export const SUMMARY_MIN_ENTRIES = BOARD_SUMMARY_FLOOR;
-
-/** Newest-kept budget per section when rendering the summary. */
-const PER_SECTION: Record<string, number> = {
-	goal: 8,
-	prefs: 10,
-	decisions: 14,
-	findings: 8,
-	files: 12,
-	issues: 8,
-	next: 8,
-};
-
-const fmt = (ts: string, text: string): string => `- ${text}  _(${ts})_`;
-const isPointer = (e: { text: string }): boolean => e.text.startsWith("(archived)");
 
 export interface SummaryOptions {
 	maxChars?: number;
-	/** Rendered into the footer so the model knows verbatim turns follow. */
 	keptTailNote?: string;
-	/** Absolute path of the board file, for "read the rest" instructions. */
+	/** Legacy retrieval locations; removed from the event-backed runtime in S2. */
 	boardFile?: string;
-	/**
-	 * Directory holding the rotated archive files. Without it the footer points
-	 * only at the live board, so entries that were rotated out look gone.
-	 */
 	archiveDir?: string;
-	/** Name of the retrieval tool the model can use to search the board. */
 	recallTool?: string;
 }
 
-/**
- * Render the board as a compaction summary. Returns null when the board is too
- * thin to stand in for a summary (caller must then fall back to pi's native
- * summarization).
- */
-export function renderSummary(board: Board, opts: SummaryOptions = {}): string | null {
-	const maxChars = opts.maxChars ?? SUMMARY_DEFAULT_MAX_CHARS;
-	const recallTool = opts.recallTool ?? "recall";
+export type SummarySelection = {
+	text: string | null;
+	reason?: "thin-board" | "invalid-budget" | "over-budget";
+	selected: Array<{ section: Section; entry: BoardEntry }>;
+	omitted: number;
+};
 
-	const real = (s: string): number =>
-		(board.sections[s as keyof Board["sections"]] ?? []).filter((e) => !isPointer(e) && e.text.trim() !== "").length;
-	if (SECTIONS.reduce((n, s) => n + real(s), 0) < SUMMARY_MIN_ENTRIES) return null;
+const BLOCKS: Array<[string, Section]> = [
+	["Goal", "goal"], ["Constraints & Preferences", "prefs"], ["Key Decisions", "decisions"],
+	["Key Findings", "findings"], ["Files & Changes", "files"], ["Open Issues", "issues"], ["Next Steps", "next"],
+];
+const real = (entry: BoardEntry) => !!entry.text.trim() && !entry.text.startsWith("(archived)");
+const time = (stamp: string): number => {
+	const value = Date.parse(stamp.includes("T") ? stamp : stamp.replace(" ", "T"));
+	return Number.isFinite(value) ? value : 0;
+};
 
-	const pick = (s: string) =>
-		(board.sections[s as keyof Board["sections"]] ?? [])
-			.filter((e) => !isPointer(e) && e.text.trim() !== "")
-			.slice(-(PER_SECTION[s] ?? 6));
+export function selectSummary(board: Board, opts: SummaryOptions = {}): SummarySelection {
+	const max = opts.maxChars ?? SUMMARY_DEFAULT_MAX_CHARS;
+	const result: SummarySelection = { text: null, selected: [], omitted: 0 };
+	if (!Number.isFinite(max) || max < 1) return { ...result, reason: "invalid-budget" };
+	const all = BLOCKS.flatMap(([, section]) => board.sections[section]
+		.filter(real).map((entry) => ({ section, entry })))
+		.map((item, order) => ({ ...item, order }));
+	result.omitted = all.length;
+	if (all.length < SUMMARY_MIN_ENTRIES) return { ...result, reason: "thin-board" };
+	// Legacy timestamps can tie; stable traversal order is the deterministic fallback.
+	// v2 supplies the actual event order, independent of section layout.
+	all.sort((a, b) => time(b.entry.ts) - time(a.entry.ts) || (b.entry.order ?? b.order) - (a.entry.order ?? a.order));
 
-	const head: string[] = [
-		"# Session context checkpoint",
-		"",
-		"Curated session blackboard (deterministic; committed and reviewed by the agent during the session).",
-		"This is the compaction summary: everything above the retained tail has been replaced by it.",
-		...(opts.keptTailNote ? [opts.keptTailNote] : []),
-	];
-
-	// Native shape first (Goal / Constraints & Preferences / Progress / Key
-	// Decisions / Next Steps / Critical Context), then the board-only sections.
-	const blocks: Array<[string, string]> = [
-		["Goal", "goal"],
-		["Constraints & Preferences", "prefs"],
-		["Key Decisions", "decisions"],
-		["Key Findings", "findings"],
-		["Files & Changes", "files"],
-		["Open Issues", "issues"],
-		["Next Steps", "next"],
-	];
-	const body: string[] = [];
-	for (const [title, key] of blocks) {
-		const entries = pick(key);
-		if (!entries.length) continue;
-		body.push("", `## ${title}`);
-		body.push(...entries.map((e) => fmt(e.ts, e.text)));
-	}
-	if (board.sections.archived?.length) {
-		body.push("", `## Archived (${board.sections.archived.length} older entries, not repeated here)`);
-	}
-
-	const counts = SECTIONS.map((s: Section) => `${SECTION_HEADERS[s].toLowerCase()}:${board.sections[s].filter((e) => !isPointer(e)).length}`).join(", ");
-	const footer: string[] = [
-		"",
-		"---",
-		// Real entries only: pointer lines are bookkeeping, and counting them
-		// made the footer claim 60 entries when 5 facts were on the board.
-		`Blackboard: ${countReal(board)} entries (${counts}).`,
-		[
-			opts.boardFile ? `Full board (every entry, verbatim): ${opts.boardFile}.` : "",
-			opts.archiveDir ? `Rotated history: ${opts.archiveDir}.` : "",
-			`Use the \`${recallTool}\` tool to search older entries by keyword instead of re-reading this summary.`,
-		]
-			.filter(Boolean)
-			.join(" "),
-	];
-
-	// The footer carries the retrieval instructions, so it is reserved first:
-	// when the body does not fit, drop its OLDEST lines, never the footer.
-	const budget = Math.max(500, maxChars - footer.join("\n").length - head.join("\n").length - 2);
-	let kept = body;
-	if (body.join("\n").length > budget) {
-		kept = [];
-		let used = 0;
-		for (let i = body.length - 1; i >= 0; i--) {
-			const l = body[i];
-			if (used + l.length + 1 > budget) continue; // try to keep older short lines too
-			kept.unshift(l);
-			used += l.length + 1;
+	const head = ["# Session context checkpoint", "",
+		"Curated session blackboard (deterministic; agent-reviewed notes, not independently verified facts).",
+		"This is the compaction summary: earlier messages are replaced; the retained tail follows.",
+		...(opts.keptTailNote ? [opts.keptTailNote] : [])];
+	const counts = SECTIONS.map((s) => `${SECTION_HEADERS[s].toLowerCase()}:${board.sections[s].filter(real).length}`).join(", ");
+	const recall = opts.recallTool ?? "blackboard_recall";
+	const render = (selected: SummarySelection["selected"]): string => {
+		const body: string[] = [];
+		for (const [title, section] of BLOCKS) {
+			const entries = selected.filter((item) => item.section === section);
+			if (entries.length) body.push("", `## ${title}`, ...entries.map(({ entry }) => `- ${entry.text}  _(${entry.ts})_`));
 		}
-		kept = kept.filter((l, i, arr) => !(l === "" && (i === 0 || arr[i - 1] === "")));
+		const omitted = all.length - selected.length;
+		const footer = ["", "---", `Blackboard: ${countReal(board)} entries (${counts}).`,
+			...(omitted ? [`${omitted} older entries omitted — use the recall tool.`] : []),
+			...(opts.boardFile ? [`Full board (every entry, verbatim): ${opts.boardFile}.`] : []),
+			...(opts.archiveDir ? [`Rotated history: ${opts.archiveDir}.`] : []),
+			`Use \`${recall}\` to search older entries.`];
+		return [...head, ...body, ...footer].join("\n");
+	};
+	for (const candidate of all) {
+		const next = [...result.selected, candidate];
+		if (render(next).length > max) break; // newest prefix, not a knapsack of older short lines
+		result.selected.push(candidate);
 	}
-	const out = [...head, ...kept, ...(kept.length < body.length ? ["", "…(older entries omitted — use the recall tool)"] : []), ...footer].join("\n");
-	return out;
+	result.omitted = all.length - result.selected.length;
+	if (!result.selected.length) return { ...result, reason: "over-budget" };
+	const text = render(result.selected);
+	return text.length <= max ? { ...result, text } : { ...result, reason: "over-budget" };
+}
+
+/** Null means the caller must repair the board or use an explicitly diagnosed safe fallback. */
+export function renderSummary(board: Board, opts: SummaryOptions = {}): string | null {
+	return selectSummary(board, opts).text;
 }
