@@ -7,7 +7,7 @@
  *     └─ normalize new branch entries
  *        └─ vcc-style deterministic extraction (goal/scope, prefs, files+symbols,
  *           commits, errors/issues, decisions, next-steps)  →  pending draft
- *           └─ [RESOLVED] marking of open issues when their files got modified
+ *           └─ revalidation candidates when referenced files changed (never auto-resolve)
  *        └─ checkpoint due? (default: every turn)
  *             └─ before_agent_start injects the draft (display:false) with
  *                instructions to review it
@@ -47,7 +47,7 @@ import {
 	countAll,
 	countReal,
 	digest,
-	markResolved,
+	revalidationCandidates,
 	readBoardFile,
 	renderBoard,
 	renderCommitEcho,
@@ -332,14 +332,12 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 		if (fresh.length > 0) {
 			const blocks = normalizeBranch(fresh);
 			const board = readBoardFile(s.cfg.boardDir, s.sessionId);
-			const { draft, resolvedPaths, experiments } = extractAll(blocks, board, st);
+			const { draft, modifiedPaths, experiments } = extractAll(blocks, board, st);
 
 			if (!st.goalExtracted) st.goalExtracted = true;
 
-			if (resolvedPaths.length > 0) {
-				const n = markResolved(board, resolvedPaths);
-				if (n > 0) writeBoard(s.cfg.boardDir, s.sessionId, board);
-			}
+			const rechecks = revalidationCandidates(board, modifiedPaths);
+			if (rechecks.length > 0) draft.issues = [...(draft.issues ?? []), ...rechecks];
 
 			if (countDraftLines(draft) > 0 || experiments.length > 0) {
 				const pd: PendingDraft = st.pendingDraft ?? {

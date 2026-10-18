@@ -427,7 +427,7 @@ export function extractNext(assistants: AssistantBlock[], users: UserBlock[]): s
 
 export type ExtractResult = {
 	draft: DraftSections;
-	resolvedPaths: string[];
+	modifiedPaths: string[];
 	/** experiment-like commands run in this window (reminder fodder). */
 	experiments: string[];
 };
@@ -437,7 +437,7 @@ const PER_SECTION_CAP = 8;
 /**
  * Run all extractors over the NEW blocks of this turn. Pure function, no I/O,
  * no LLM. Returns draft lines (pre-commit) plus paths of files modified this
- * turn (used for [RESOLVED] marking of open issues).
+ * turn (only a prompt to revalidate, never proof of resolution).
  */
 export function extractAll(
 	blocks: NormalizedBlocks,
@@ -477,5 +477,5 @@ export function extractAll(
 	put("findings", extractFindings(blocks.assistants));
 	put("next", extractNext(blocks.assistants, blocks.users));
 
-	return { draft, resolvedPaths: [...files.paths], experiments: extractExperiments(blocks.tools) };
+	return { draft, modifiedPaths: [...files.paths], experiments: extractExperiments(blocks.tools) };
 }

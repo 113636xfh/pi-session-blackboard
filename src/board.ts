@@ -737,24 +737,11 @@ export function renderCommitEcho(
 	return lines.join("\n").trimStart();
 }
 
-/**
- * Mark open issue entries as resolved when a referenced file was modified in
- * the current turn. Deterministic string matching; never removes history.
- */
-export function markResolved(board: Board, modifiedPaths: string[]): number {
-	if (modifiedPaths.length === 0) return 0;
-	const ts = nowLocal();
-	let n = 0;
-	for (const e of board.sections.issues) {
-		if (e.text.includes("[RESOLVED")) continue;
-		const hit = modifiedPaths.find((p) => p && e.text.includes(p));
-		if (hit) {
-			e.text = `${e.text} → [RESOLVED ${ts}]`;
-			n++;
-		}
-	}
-	if (n > 0) board.header.updated = ts;
-	return n;
+/** A changed file suggests revalidation, never proof that an issue is resolved. */
+export function revalidationCandidates(board: Board, modifiedPaths: string[]): string[] {
+	return board.sections.issues
+		.filter((e) => !e.text.includes("[RESOLVED") && modifiedPaths.some((p) => p && e.text.includes(p)))
+		.map((e) => `[RECHECK REQUIRED — not resolved] ${e.text}`);
 }
 
 /**
