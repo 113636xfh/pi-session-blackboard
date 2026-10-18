@@ -1,7 +1,7 @@
 {
   "name": "pi-session-blackboard",
-  "version": "0.2.0",
-  "description": "Session blackboard for the pi coding agent: deterministic per-turn extraction, agent-curated commits, deterministic archival — and the board itself becomes the compaction summary, so compaction costs zero summarization calls.",
+  "version": "0.3.0",
+  "description": "Session blackboard for the pi coding agent: branch-local session events as the authoritative memory, zero-summarizer compaction takeover after bounded memory repair, and explicit Markdown export.",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -45,10 +45,11 @@
   },
   "scripts": {
     "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit",
-    "build": "node ./node_modules/typescript/bin/tsc src/index.ts src/journal.ts src/summary-import.ts src/extract.ts src/board.ts src/types.ts src/paths.ts src/state.ts src/compact-assist.ts src/summary.ts src/recall.ts src/config.ts --outDir build --module NodeNext --target ES2022 --moduleResolution NodeNext --esModuleInterop --skipLibCheck --strict",
+    "build": "node ./node_modules/typescript/bin/tsc src/index.ts src/journal.ts src/summary-import.ts src/extract.ts src/export.ts src/migration.ts src/coverage.ts src/storage.ts src/board.ts src/types.ts src/paths.ts src/state.ts src/compact-assist.ts src/summary.ts src/recall.ts src/config.ts --outDir build --module NodeNext --target ES2022 --moduleResolution NodeNext --esModuleInterop --skipLibCheck --strict",
     "test": "npm run build && node test/smoke.mjs && node --test test/reliability.mjs test/journal.mjs test/summary-import.mjs test/runtime.mjs test/faults.mjs test/platform.mjs test/sdk-contract.mjs",
     "test:sdk": "npm run build && node --test test/sdk-contract.mjs",
     "test:known": "npm run build && node --test test/known-failures.mjs",
-    "docs:render": "node docs/render.mjs"
+    "docs:render": "node docs/render.mjs",
+    "test:all": "npm run typecheck && npm test && npm run test:known"
   }
 }
