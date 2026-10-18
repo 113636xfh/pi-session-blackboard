@@ -364,10 +364,10 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     const required = refs.filter(ref => ref.entryId !== last?.id || last?.message?.role !== 'assistant' || (Array.isArray(last.message.content) && last.message.content.some((part: any) => part.type === 'toolCall')));
     const ready = checkReadiness(s.projection, required);
     if (ready.ok || (s.projection.repair?.extraRequests ?? 0) >= 2) return;
-    // A request already handed over or ignored is not re-sent here; only a compaction
-    // retry (or the near-pressure first pass) may ask again, and it spends one allowance.
+    // Exactly two deliveries per generation, and exactly one delivery point. A request that was
+    // sent and visibly ignored becomes owed again here; one still in flight is left alone.
     const phase = s.projection.repair?.phase;
-    if (phase && phase !== 'needed') return;
+    if (phase === 'checked' || phase === 'exhausted' || phase === 'queued') return;
     const pending = phase === 'needed';
     if (!pending && !pressure(ctx)?.near) return;
     if (!repairHeadroom(ctx.getContextUsage?.(), repairMessage(s.projection, s.branch, s.manager, ready.reasons).content, event.context.llmMessages)) return;
@@ -451,11 +451,18 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     }
     const allowance = s.projection.repair?.extraRequests ?? 0;
     const headroom = repairHeadroom(ctx.getContextUsage?.(), repairMessage(s.projection, s.branch, s.manager, problems).content);
-    const usable = event.reason !== 'manual' && event.reason !== 'overflow' && allowance < 2 && headroom && s.projection.repair?.phase !== 'exhausted';
+    const phase = s.projection.repair?.phase;
+    // Cancelling is only honest when this same run can deliver the repair: never while a request
+    // is in flight, never after the user cancelled, and never with the allowance spent.
+    const usable = event.reason !== 'manual' && event.reason !== 'overflow' && allowance < 2 && headroom
+      && phase !== 'queued' && phase !== 'exhausted' && phase !== 'checked';
     if (usable) {
       // Never start the model from inside the hook: mark the repair pending and let the
       // run's own before-settle boundary deliver it.
-      if (s.projection.repair?.phase !== 'needed') markNeeded(ctx, range);
+      // A previously delivered request that did not fix the range becomes owed again (allowance 2).
+      if (s.projection.repair?.phase === 'delivered') {
+        change(ctx, [{ type: 'repair', repair: { ...s.projection.repair, phase: 'needed' } }]);
+      } else if (s.projection.repair?.phase !== 'needed') markNeeded(ctx, range);
       logAttempt('deferred', { reason: event.reason, problems: problems.length, allowance: allowance + 1, generation: s.projection.generation });
       notify(ctx, 'Compaction deferred for a bounded memory repair; the current turn will finish it.', 'info');
       return { cancel: true };

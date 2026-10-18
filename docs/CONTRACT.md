@@ -77,8 +77,27 @@ suite:
    that generation, retention consumption and the summary text behave as tested;
 3. a migration dry run and one `apply` on a copy of a real board.
 
-Until those are done, 0.3 is a candidate, not a release. They are deliberately
-left unchecked rather than mocked.
+### Observed live result (2026-10-18, local `strata/qwen3.8-flash-next-iq3_s`)
+
+A throwaway project was run with the compaction trigger pinned low so a short
+session compacts like a long one. Result of that run:
+
+- automatic compactions: 12; **11 taken over by the blackboard**, 2 native;
+- the constraint string survived verbatim, the retracted instruction did not
+  come back, no countdown numbers appeared, summary 5 072 chars (within budget);
+- **the manual compaction was not taken over**: its cut included the model's last
+  answer, which had not been reviewed, so the documented manual-with-gaps path
+  applied (native, reason recorded).
+
+A second run with a lower tail pinned much tighter exposed a real defect: the
+deferral could cancel a threshold compaction without any delivery happening,
+repeating for many turns. The state machine now refuses to cancel while a repair
+request is in flight or after it was delivered-and-ignored (that one becomes owed
+once more, spending the second allowance), and the deterministic suite covers both
+paths. The live reproduction of the loop was not confirmed afterwards, so:
+
+**Status: not released.** The gate above is still open, with the manual-compaction
+takeover and the cancel-without-delivery class of bug as the two open items.
 
 ## Rollback
 

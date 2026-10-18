@@ -52,7 +52,7 @@ async function runArm(arm, task, rounds, modelSpec) {
     const [provId, modelId] = real ? modelSpec.split('/') : ['eval-offline', 'fixed'];
     const key = `${provId}/${modelId}`;
     const compaction = real
-      ? { enabled: true, modelOverrides: { [key]: { reserveTokens: 250000, keepRecentTokens: 3000 } } }
+      ? { enabled: true, modelOverrides: { [key]: { reserveTokens: 232144, keepRecentTokens: 6000 } } }
       : { enabled: true, reserveTokens: 600, keepRecentTokens: 700 };
     const settings = SettingsManager.inMemory({ compaction, retry: { enabled: false } });
     const runtime = real
