@@ -394,6 +394,24 @@ test('off mode keeps notes but never takes over; assist needs an explicit opt-in
   assert.equal(h.notices.some(note => /assist|takeover/i.test(note[0]) && /running/i.test(note[0])), false);
 });
 
+test('disabled removes both tools from the model-visible set and stops injection, without touching others', async t => {
+  const h = harness(t);
+  h.active().push('other-extension-tool');
+  writeFileSync(join(h.cwd, '.pi/settings.json'), JSON.stringify({ 'session-blackboard': { boardDir: join(h.cwd, 'boards'), compaction: 'board', enabled: false } }));
+  await h.hooks.session_start({}, h.ctx);
+  assert(!h.active().includes('blackboard') && !h.active().includes('blackboard_recall'), 'own tools are removed');
+  assert(h.active().includes('other-extension-tool') && h.active().includes('read'), 'other tools are untouched');
+  await assert.rejects(() => h.invoke({ action: 'show' }), /disabled/);
+  assert.equal((await h.hooks.before_agent_start({}, h.ctx))?.message, undefined, 'no reminder while disabled');
+  writeFileSync(join(h.cwd, '.pi/settings.json'), JSON.stringify({ 'session-blackboard': { boardDir: join(h.cwd, 'boards'), compaction: 'board' } }));
+  await h.hooks.session_tree({}, h.ctx);
+  assert(h.active().includes('blackboard') && h.active().includes('blackboard_recall'), 're-enabled session re-syncs');
+  assert(h.active().includes('other-extension-tool'), 'other tools survive the toggle');
+  writeFileSync(join(h.cwd, '.pi/settings.json'), JSON.stringify({ 'session-blackboard': { boardDir: join(h.cwd, 'boards'), compaction: 'board', enabled: false } }));
+  await h.hooks.session_tree({}, h.ctx);
+  assert(!h.active().includes('blackboard'), 'disabling again removes them');
+});
+
 test('cooperating writers cannot share a session lock, and release does not delete another owner', t => {
   const h = harness(t), a = new WriterLocks(), b = new WriterLocks();
   t.after(() => { a.release(); b.release(); });

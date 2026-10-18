@@ -47,9 +47,20 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
   };
   const change = (ctx: Ctx, changes: JournalChange[], operationId?: string) => commit(ctx, newEvent(get(ctx).projection, changes, operationId));
   const notify = (ctx: Ctx, text: string, kind = 'info') => ctx.ui?.notify?.(text, kind);
+  const activated = new Set<string>();
   const syncTools = (ctx: Ctx) => {
-    const { cfg } = get(ctx), active = pi.getActiveTools();
-    if (!cfg.enabled) pi.setActiveTools(active.filter(name => !OWN_TOOLS.includes(name)));
+    const s = get(ctx), active = pi.getActiveTools();
+    // Only ever touch this extension's own tools: other extensions' and the user's choices stay.
+    const enabledOwn = s.cfg.enabled;
+    if (!enabledOwn) {
+      if (active.some(name => OWN_TOOLS.includes(name))) pi.setActiveTools(active.filter(name => !OWN_TOOLS.includes(name)));
+      activated.delete(s.sessionId);
+      return;
+    }
+    if (activated.has(s.sessionId)) return;
+    activated.add(s.sessionId);
+    const missing = OWN_TOOLS.filter(name => !active.includes(name));
+    if (missing.length) pi.setActiveTools([...active, ...missing]);
   };
   const result = (text: string, details: Record<string, unknown> = {}) => ({ content: [{ type: 'text' as const, text }], details });
   const selected = (projection: JournalProjection, target: string) => {
@@ -233,6 +244,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     return { message: { customType: 'sbb-review-needed', display: false, details: { generation: s.projection.generation }, content: lines.join('\n') } };
   };
   pi.on('session_start', async (_event, ctx) => {
+    activated.clear();
     syncTools(ctx);
     const s = get(ctx);
     for (const hint of s.cfg.hints ?? []) notify(ctx, `session-blackboard settings: ${hint}`, 'warning');
@@ -338,7 +350,8 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     if (!content) return;
     return { entries: [{ type: 'custom_message', customType: 'sbb-urgent-write', content, display: false, details: { generation: s.projection.generation } }], continue: true };
   });
-  pi.on('session_shutdown', async () => { locks.release(); });
+  pi.on('session_tree', async (_event, ctx) => { activated.clear(); syncTools(ctx); });
+  pi.on('session_shutdown', async () => { activated.clear(); locks.release(); });
   const logAttempt = (kind: string, data: Record<string, unknown>) => {
     try { pi.appendEntry('sbb-compaction', { kind, at: new Date().toISOString(), ...data }); } catch { /* diagnostics only */ }
   };
