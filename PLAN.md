@@ -287,8 +287,8 @@ checkpoint携带一次性审校凭据：分支/范围、截止entry、内容指�
 
 ### S4：原生导入、分节状态与模式契约
 
-- [ ] 分层解析Progress子节、checkbox、有序下一步、Critical Context和文件XML；未知块完整保留。
-- [ ] 不再以路径/报错正则覆盖所有显式节语义；内容提示只用于候选标注。
+- [x] 分层解析Progress子节、checkbox、有序下一步、Critical Context和文件XML；未知块完整保留。
+- [x] 不再以路径/报错正则覆盖所有显式节语义；内容提示只用于候选标注。
 - [ ] 导入保留原摘要引用与覆盖，重复导入按来源entry幂等，不让截掉的内容被宣称已迁移完整。
 - [ ] 完成Progress与Critical Context输出，当前状态取代过时计划；同时保留必要文件轨迹details。
 - [ ] 修正off/digest/board/assist的文档与行为：off仍可保留主动记笔记，但不得默认接管原生；辅助路径只在显式启用时运行，旧设置给迁移提示。

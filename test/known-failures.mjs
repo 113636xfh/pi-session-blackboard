@@ -5,7 +5,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, utime
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import extension from '../build/index.js';
-import { commitEntries, parseSummarySections } from '../build/board.js';
+import { commitEntries } from '../build/board.js';
+import { parseNativeSummary } from '../build/summary-import.js';
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/reliability.json', import.meta.url), 'utf8'));
 
 function harness(t) {
@@ -45,8 +46,8 @@ test('S2: unscoped legacy data must not become the current branch summary', asyn
   assert(!shown.content[0].text.includes('BRANCH_A'));
 });
 
-test('S4 known gap: native Progress preserves done/in-progress/blocked state', { todo: 'requires structured summary import' }, () => {
-  const parsed = parseSummarySections(fixture.nativeSummary);
+test('S4: native Progress preserves done/in-progress/blocked state', () => {
+  const parsed = parseNativeSummary(fixture.nativeSummary);
   assert.equal(parsed.find(item => item.text.includes('Inspected the parser'))?.taskState, 'done');
   assert.equal(parsed.find(item => item.text.includes('Checking the renderer'))?.taskState, 'in_progress');
   assert.equal(parsed.find(item => item.text.includes('Awaiting user approval'))?.taskState, 'blocked');

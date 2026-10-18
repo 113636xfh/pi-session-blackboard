@@ -9,6 +9,7 @@ import { normalizeBranch, extractAll } from './extract.js';
 import { defaultState } from './state.js';
 import { selectDraftLines, hasSummaryContext } from './board.js';
 import { renderSummary } from './summary.js';
+import { planImport } from './summary-import.js';
 import { boardPath } from './paths.js';
 import { inspectLegacy, migrateLegacy } from './migration.js';
 import { renderSnapshot, exportMarkdown, exportOptions } from './export.js';
@@ -427,10 +428,20 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     if (changes.length) change(ctx, changes);
     if (entry?.summary && !ours) {
       // Some other producer (pi itself, assist, another extension) wrote this summary. It is the
-      // only record of the replaced messages, so it must be reviewed and imported, never skipped
-      // just because `fromExtension` happens to be true.
-      logAttempt('foreign-summary', { compactionId: entry.id, fromHook: entry.fromHook === true, fingerprint: fingerprint(entry.summary) });
-      notify(ctx, 'A summary not produced by this blackboard is pending review and import; run /bb review before the next compaction relies on it.', 'warning');
+      // only record of the replaced messages, so it is imported with its source reference, never
+      // skipped just because `fromExtension` happens to be true.
+      const sourceId = entry.id ?? `summary-${fingerprint(entry.summary).slice(0, 16)}`;
+      try {
+        const planned = planImport(replayBranch(s.manager.getBranch()), sourceId, entry.summary, `import-${sourceId}`);
+        if (planned.event) change(ctx, planned.event.changes, planned.event.operationId);
+        logAttempt('foreign-summary', { compactionId: sourceId, fromHook: entry.fromHook === true, imported: planned.imported, duplicates: planned.duplicates, incomplete: planned.incomplete.length });
+        notify(ctx, planned.incomplete.length
+          ? `Imported ${planned.imported} native-summary entries; ${planned.incomplete.length} oversized block(s) were NOT imported (original summary still referenced: ${sourceId}). Content is unverified and this is not claimed complete.`
+          : `Imported ${planned.imported} native-summary entries (${planned.duplicates} already known) from ${sourceId}; content is unverified — review before relying on it.`, planned.incomplete.length ? 'warning' : 'info');
+      } catch (error) {
+        logAttempt('foreign-summary-error', { compactionId: sourceId, error: error instanceof Error ? error.message : String(error) });
+        notify(ctx, `Could not import the foreign summary: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      }
     }
     logAttempt('success', { reason: event?.reason, fromUs: ours, generation: replayBranch(s.manager.getBranch()).generation });
   });

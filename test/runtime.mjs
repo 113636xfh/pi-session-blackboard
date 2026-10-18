@@ -349,13 +349,13 @@ test('summary ownership is an explicit generator claim, not fromExtension', asyn
   assert.equal(made.details.source, 'session-events');
   // Another extension's summary with fromHook=true must still be treated as foreign.
   await h.hooks.session_compact({ reason: 'threshold', compactionEntry: { id: 'foreign-1', summary: 'Someone else wrote this', fromHook: true, details: { generator: 'other-extension', schema: 9 } } }, h.ctx);
-  assert(h.notices.at(-1)[0].includes('pending review and import'));
+  assert(h.notices.at(-1)[0].includes('Imported'));
   const logged = h.branch.filter(entry => entry.customType === 'sbb-compaction').map(entry => entry.data);
   assert(logged.some(item => item.kind === 'foreign-summary' && item.compactionId === 'foreign-1'));
   assert(logged.some(item => item.kind === 'success' && item.fromUs === false));
   const before = h.notices.length;
   await h.hooks.session_compact({ reason: 'threshold', compactionEntry: { id: 'own-1', summary: made.summary, details: made.details } }, h.ctx);
-  assert(h.notices.length === before, 'our own summary produces no import warning');
+  assert(h.notices.length === before, 'our own summary is never imported back into itself');
 });
 
 test('cooperating writers cannot share a session lock, and release does not delete another owner', t => {
