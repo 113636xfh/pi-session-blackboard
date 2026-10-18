@@ -367,7 +367,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     // Exactly two deliveries per generation, and exactly one delivery point. A request that was
     // sent and visibly ignored becomes owed again here; one still in flight is left alone.
     const phase = s.projection.repair?.phase;
-    if (phase === 'checked' || phase === 'exhausted' || phase === 'queued') return;
+    if (phase && phase !== 'needed') return;
     const pending = phase === 'needed';
     if (!pending && !pressure(ctx)?.near) return;
     if (!repairHeadroom(ctx.getContextUsage?.(), repairMessage(s.projection, s.branch, s.manager, ready.reasons).content, event.context.llmMessages)) return;
