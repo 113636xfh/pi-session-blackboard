@@ -108,11 +108,10 @@ export function normalizeBranch(entries: BranchEntry[]): NormalizedBlocks {
 // ---------------------------------------------------------------------------
 
 const SCOPE_CHANGE_RE =
-	/\b(instead|actually|change of plan|forget that|new task|switch to|now I want|pivot|let'?s do|stop .* and)\b/i;
+	/\b(instead|actually|change of plan|forget that|new task|switch to|now I want|pivot|let'?s do|stop .* and)\b|改为|改成|计划变更|换个任务|先别实现/i;
 const NOISE_SHORT_RE = /^(ok|yes|no|sure|yeah|yep|go|hi|hey|thx|thanks|y|n|k)\s*[.!?]*$/i;
 const NON_GOAL_RE =
 	/^\s*[\[│├└─╭╰]|```|^\s*(function |const |let |var |import |export |class )|^(https?:|file:|\/[A-Za-z])|\n/;
-const MAX_GOAL_CHARS = 200;
 const LEADING_CHARS = 200;
 
 const stripBullet = (line: string) => line.replace(/^\s*(?:[-*+]|\d+\.)\s+/, "").trim();
@@ -121,7 +120,7 @@ function goalLines(text: string): string[] {
 	const out: string[] = [];
 	for (const raw of text.split("\n")) {
 		const t = stripBullet(raw.trim());
-		if (t.length <= 5 || t.length > MAX_GOAL_CHARS) continue;
+		if (t.length < 3) continue;
 		if (NOISE_SHORT_RE.test(t)) continue;
 		if (NON_GOAL_RE.test(t)) continue;
 		out.push(t);
@@ -164,6 +163,8 @@ export function extractGoal(users: UserBlock[], board: Board, state: SbbState): 
 }
 
 const PREF_PATTERNS = [
+	/(?:禁止|不要|不得|不能|务必|必须|始终|仅限|只允许|优先使用|请使用|请避免|偏好)/,
+	/用中文(?:回答|回复)|(?:费用|预算).*(?:不超过|上限|最多)/,
 	/\bprefer(?:s|red|ring)?\s+\w/i,
 	/\bdon'?t want\b/i,
 	/\balways (?:use|do|run|prefer|keep|make|format|write|add|set|put|prefix|start|include|append)\b/i,
@@ -178,8 +179,8 @@ export function extractPrefs(users: UserBlock[], existing: string[]): string[] {
 	for (const b of users) {
 		for (const raw of b.text.split("\n")) {
 			const t = raw.trim();
-			if (t.length < 5 || t.length > 200) continue;
-			if (t.endsWith("?") || t.includes("?...")) continue;
+			if (t.length < 3) continue;
+			if (t.endsWith("?") || t.endsWith("？") || t.includes("?...")) continue;
 			if (!PREF_PATTERNS.some((p) => p.test(t))) continue;
 			const c = t;
 			if (seen.has(c.toLowerCase())) continue;

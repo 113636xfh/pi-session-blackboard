@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { readFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { normalizeBranch, extractAll, extractFiles, extractIssues, extractFindings } from '../build/extract.js';
+import { normalizeBranch, extractAll, extractFiles, extractIssues, extractFindings, extractPrefs } from '../build/extract.js';
 import { cleanEntryText, commitEntries, hasSummaryContext, revalidationCandidates } from '../build/board.js';
 import { defaultState } from '../build/state.js';
 import { renderSummary, selectSummary } from '../build/summary.js';
@@ -97,6 +97,36 @@ test('long findings preserve the final negative qualifier or are rejected intact
   assert.equal(extractFindings([{ entryId: 'finding', text }])[0], text);
   assert.throws(() => cleanEntryText(text, 300), /Nothing was truncated/);
   assert.equal(cleanEntryText('  尚未验证\n不能视为成功  ', 300), '尚未验证 不能视为成功');
+});
+
+test('Chinese constraints preserve negatives and do not turn questions into preferences', () => {
+  const constraint = '未经用户批准，不得修改源码；预算不得超过10元。' + '此结论尚未验证。'.repeat(40);
+  assert.deepEqual(extractPrefs([{ entryId: 'u', text: constraint }], []), [constraint]);
+  assert.deepEqual(extractPrefs([{ entryId: 'q', text: '不要使用缓存会怎样？' }], []), []);
+  const { draft } = extractAll({ users: [{ entryId: 'g', text: '先别实现，改为只读审查；之前的方案尚未批准。' }], assistants: [], tools: [] }, emptyBoard(), defaultState());
+  assert(draft.goal.includes('先别实现，改为只读审查；之前的方案尚未批准。'));
+});
+
+test('same timestamps use explicit event order independent of section layout', () => {
+  const board = summaryBoard();
+  for (const entries of Object.values(board.sections)) for (const entry of entries) entry.ts = '2026-01-01T00:00:00Z';
+  assert.deepEqual(selectSummary(board).selected.map(x => x.entry.order), [3, 2, 1]);
+  assert.deepEqual(selectSummary(board).selected.map(x => x.entry.order), [3, 2, 1]);
+});
+
+test('exact boundary budgets and long Windows paths never overflow or split claims', () => {
+  const board = summaryBoard();
+  const options = { boardFile: ['C:', ...Array(20).fill('folder & 中文'), 'snapshot.md'].join(String.fromCharCode(92)) };
+  const full = renderSummary(board, { ...options, maxChars: 10000 });
+  assert(full);
+  assert.equal(renderSummary(board, { ...options, maxChars: full.length }), full);
+  const less = renderSummary(board, { ...options, maxChars: full.length - 1 });
+  assert(less === null || less.length <= full.length - 1);
+  const large = emptyBoard();
+  large.sections.goal.push({ ts: '2026-01-03', text: 'x'.repeat(5000) + ' NOT VERIFIED' });
+  large.sections.files.push({ ts: '2026-01-02', text: 'small old file' });
+  large.sections.next.push({ ts: '2026-01-01', text: 'small old next' });
+  assert.equal(renderSummary(large, { maxChars: 1000 }), null, 'do not skip the newest long entry to fill the budget with older snippets');
 });
 
 test('an oversized input rejects the whole legacy commit before any board writes', (t) => {
