@@ -36,7 +36,7 @@ function notesFor(task, round) {
   return entries;
 }
 
-async function runArm(arm, task, rounds) {
+async function runArm(arm, task, rounds, modelSpec) {
   const dir = mkdtempSync(join(tmpdir(), `sbb-eval-${arm.id}-`));
   let session;
   const calls = [];
@@ -47,9 +47,18 @@ async function runArm(arm, task, rounds) {
     } }));
     const manager = SessionManager.create(dir, join(dir, 'sessions'));
     // A tiny context window makes pi compact during the run, without faking the trigger.
-    const settings = SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens: 600, keepRecentTokens: 700 }, retry: { enabled: false } });
-    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, allowModelNetwork: false, refreshOnCreate: false });
-    runtime.registerProvider('eval-offline', {
+    // A real model has a huge window, so the experiment pins its own trigger instead of waiting for it.
+    const real = Boolean(modelSpec);
+    const [provId, modelId] = real ? modelSpec.split('/') : ['eval-offline', 'fixed'];
+    const key = `${provId}/${modelId}`;
+    const compaction = real
+      ? { enabled: true, modelOverrides: { [key]: { reserveTokens: 250000, keepRecentTokens: 3000 } } }
+      : { enabled: true, reserveTokens: 600, keepRecentTokens: 700 };
+    const settings = SettingsManager.inMemory({ compaction, retry: { enabled: false } });
+    const runtime = real
+      ? await ModelRuntime.create({ allowModelNetwork: false })
+      : await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, allowModelNetwork: false, refreshOnCreate: false });
+    if (!real) runtime.registerProvider('eval-offline', {
       api: 'openai-completions', baseUrl: 'http://127.0.0.1:1/unused', apiKey: 'synthetic',
       models: [{ id: 'fixed', name: 'Fixed', input: ['text'], reasoning: false, contextWindow: 2400, maxTokens: 400, cost: ZERO_COST }],
       streamSimple(model, context) {
@@ -99,23 +108,49 @@ async function runArm(arm, task, rounds) {
     const loader = new DefaultResourceLoader({
       cwd: dir, agentDir: join(dir, 'agent'), settingsManager: settings,
       noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true,
-      systemPrompt: 'Evaluation fixture.',
+      systemPrompt: real
+        ? 'You are running a controlled evaluation. Follow the user instruction exactly. Use the blackboard tool: after each step record the goal, the constraint, and the current task state; when asked to review, call the blackboard tool with action="review", then confirm that review credential with a commit and all three reviewed flags set to true. Never claim work you did not do.'
+        : 'Evaluation fixture.',
       ...(extensionPath ? { additionalExtensionPaths: [extensionPath] } : {}),
     });
     await loader.reload();
     if (extensionPath && loader.getExtensions().extensions.length === 0) return { arm: arm.id, task: task.id, status: 'skipped', reason: 'extension did not load' };
     const created = await createAgentSession({ cwd: dir, agentDir: join(dir, 'agent'), modelRuntime: runtime,
-      model: runtime.getModel('eval-offline', 'fixed'), thinkingLevel: 'off', sessionManager: manager,
+      model: runtime.getModel(provId, modelId), thinkingLevel: 'off', sessionManager: manager,
       settingsManager: settings, resourceLoader: loader });
     session = created.session;
+    const withTimeout = async (label, work) => {
+      let timer;
+      const guard = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`timeout after ${promptTimeoutMs / 1000}s: ${label}`)), promptTimeoutMs); });
+      try { return await Promise.race([work(), guard]); }
+      finally { clearTimeout(timer); }
+    };
     const errors = [];
     session.subscribe(event => {
       if (process.env.SBB_EVAL_DEBUG && (event.type === 'compaction_end' || event.type === 'compaction_start')) console.error('EV', event.type, event.reason, event.errorMessage ?? '', event.aborted ?? '');
     });
     await session.bindExtensions({ mode: 'print', onError: error => errors.push(error) });
     for (let round = 0; round <= rounds; round++) {
-      await session.prompt(script(task, round));
+      const prompt = real
+        ? `Round ${round}. Constraint in force: ${task.constraint}. Do this step: ${task.steps[Math.min(round, task.steps.length - 1)]}. Record it on the blackboard (goal, constraint, current state), then request a review credential and confirm it.`
+        : script(task, round);
+      try { await withTimeout(`round ${round}`, () => session.prompt(prompt)); }
+      catch (error) {
+        // A stuck or extremely slow round is data, not a crash: record it and stop this task.
+        return { arm: arm.id, task: task.id, status: 'timeout', reason: error instanceof Error ? error.message : String(error),
+          compactions: manager.getBranch().filter(entry => entry.type === 'compaction').length };
+      }
       if (errors.length) return { arm: arm.id, task: task.id, status: 'error', reason: String(errors[0]) };
+    }
+    if (real) {
+      // A real model reports its own token usage, so the threshold may never fire in a short
+      // fixture. Force one manual compaction: with coverage established this must be taken over.
+      try { await withTimeout('manual compaction', () => session.compact()); }
+      catch (error) {
+        const attempted = manager.getBranch().filter(entry => entry.type === 'compaction').length;
+        if (!attempted) return { arm: arm.id, task: task.id, status: 'compaction-failed', reason: error instanceof Error ? error.message : String(error),
+          compactions: 0, summaryCalls: 0, results: [], passed: false };
+      }
     }
     const compactions = manager.getBranch().filter(entry => entry.type === 'compaction');
     const summary = compactions.map(entry => entry.summary).join('\n\n');
@@ -129,28 +164,43 @@ async function runArm(arm, task, rounds) {
       return !(details.generator === 'pi-session-blackboard');
     }).length;
     return { arm: arm.id, task: task.id, status: 'ran', compactions: compactions.length, summaryChars: summary.length,
-      modelCalls: calls.length, summaryCalls, results, passed: results.every(result => result.ok),
+      modelCalls: real ? null : calls.length, summaryCalls, results, passed: results.every(result => result.ok),
       summary: summary.slice(0, 2000) };
   } finally {
     session?.dispose();
-    rmSync(dir, { recursive: true, force: true });
+    // Windows keeps handles open for a moment after dispose; cleanup must not fail the run.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try { rmSync(dir, { recursive: true, force: true }); break; }
+      catch { if (attempt === 4) console.error(`cleanup skipped: ${dir}`); }
+    }
   }
 }
 
-const only = process.argv.includes('--arm') ? process.argv[process.argv.indexOf('--arm') + 1] : null;
+const arg = name => process.argv.includes(name) ? process.argv[process.argv.indexOf(name) + 1] : null;
+const modelSpec = arg('--model');            // e.g. strata/qwen3.8-flash-next-iq3_s
+const only = arg('--arm');
+const onlyTask = arg('--task');
+const promptTimeoutMs = Number(arg('--timeout-min') ?? 0) * 60000 || 8 * 60000;
 const roundsArg = Number(process.argv[process.argv.indexOf('--rounds') + 1]) || 0;
 const rounds = Number.isFinite(roundsArg) && roundsArg > 0 ? roundsArg : config.loop.rounds[1];
 const arms = config.arms.filter(arm => !only || arm.id === only);
 const rows = [];
-for (const arm of arms) for (const task of config.tasks) rows.push(await runArm(arm, task, rounds));
+for (const arm of arms) for (const task of config.tasks) {
+  if (onlyTask && task.id !== onlyTask) continue;
+  rows.push(await runArm(arm, task, rounds, modelSpec));
+}
 
 const ran = rows.filter(row => row.status === 'ran');
 const report = {
   generatedAt: new Date().toISOString(),
   rounds,
-  note: 'Deterministic scripted agent and in-process model: this measures the compaction pipeline, not model quality.',
+  model: modelSpec ?? 'in-process-fixed-stream',
+  note: modelSpec
+    ? 'Real model run: the agent is the model itself, so results include its compliance. Compaction trigger is pinned by modelOverrides.'
+    : 'Deterministic scripted agent and in-process model: this measures the compaction pipeline, not model quality.',
   rows,
   summary: arms.map(arm => {
+    const realRun = Boolean(modelSpec);
     const own = rows.filter(row => row.arm === arm.id);
     const ok = own.filter(row => row.passed).length;
     const done = own.filter(row => row.status === 'ran').length;

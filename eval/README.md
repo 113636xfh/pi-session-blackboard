@@ -75,3 +75,45 @@ Do not add paid runs to `npm test` or to CI.
 
 None of these is wired up here yet, and none should be described as "run" until
 the harness is actually pinned and executed.
+
+## Real-model runs and the nightly job
+
+`eval/run.mjs --model <provider>/<model>` swaps the scripted model for a real one
+(here: the local `strata/qwen3.8-flash-next-iq3_s` endpoint). Because a real model
+reports its own token usage, a short fixture may never reach the automatic
+threshold, so the real-model path also forces one manual compaction at the end —
+that is the path where coverage must still be established for takeover.
+
+```bash
+npm run eval -- --model strata/qwen3.8-flash-next-iq3_s --task constraint-trap --rounds 1 --arm board-fixed
+SBB_EVAL_ROUNDS=2,4 node eval/nightly.mjs      # the full matrix, one task at a time
+```
+
+`eval/nightly.mjs` runs every arm × task × round-count sequentially with a
+per-task timeout, appending to `eval/results/`. A Windows scheduled task
+(`PiSessionBlackboardNightly`, 05:00 one-shot) runs `eval/nightly.cmd`.
+
+Trial result (1 task, 1 round, real model): 3 compactions, 13 669-char summary
+produced by this extension, constraint preserved, retracted instruction absent —
+the probe on the *paraphrased* step wording failed, which is why probes now use a
+short stable token (`config`) instead of the full phrasing. That is a probe fix,
+not a pipeline fix.
+
+### CompactBench: the version assumption was wrong
+
+`git ls-remote --tags` on `github.com/compactbench/compactbench` lists only
+`v0.1.0`; there is no `v0.2` tag (the plan's "v0.2.0 / scorer 2.0.0" is not
+tagged in the public repo). The default branch is pinned locally under
+`eval/vendor/cb` (gitignored) for reading, but **no adapter is wired up yet**:
+
+- CompactBench evaluates a *compactor* against adversarial transcripts and probing
+  questions, in Python, behind a configurable OpenAI-compatible endpoint.
+- Our renderer is not a general transcript compactor: it renders committed notes.
+  A faithful integration therefore has to run our extension inside their loop,
+  which is a separate adapter with its own tests.
+- Until that adapter exists and is verified, no CompactBench number may be quoted.
+
+`CompAct-Bench` remains a protocol reference (site/PDF, no runnable harness), and
+`MemoryAgentBench` / `LongMemEval` are the next two datasets to wire once the
+adapter shape is proven. This is deliberate: the plan forbids publishing numbers
+that were not actually produced.

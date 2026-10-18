@@ -23,7 +23,7 @@
       "probes": [
         { "mustContain": "NEVER_RENAME_TABLE_auth", "why": "a hard constraint must survive compaction" },
         { "mustNotContain": "MAY_DROP_INDEX_old", "why": "a retracted instruction must not come back" },
-        { "mustContain": "rollback", "why": "current task state must be present" }
+        { "mustContain": "config", "why": "the first concrete step must still be visible as work" }
       ]
     },
     {

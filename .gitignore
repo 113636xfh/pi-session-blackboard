@@ -19,3 +19,5 @@ tsconfig.build.json
 eval/results/*.json
 !eval/results/sample.json
 .eval-prefix
+eval/vendor/
+eval/results/*.log
