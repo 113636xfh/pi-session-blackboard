@@ -49,6 +49,7 @@ export type DraftSections = Partial<Record<Section, string[]>>;
 export type PendingDraft = {
 	generatedAt: string;
 	sections: DraftSections;
+	sources?: Record<string, SourceRef[]>;
 	/** experiment-like commands detected since the last checkpoint (reminder fodder) */
 	experiments?: string[];
 };
@@ -149,9 +150,10 @@ export type JournalChange =
 	| { type: "reset" }
 	| { type: "offer"; receipt: ReviewReceipt }
 	| { type: "review"; receipt: ReviewReceipt }
-	| { type: "draft"; draft: PendingDraft | null; cursor?: string }
+	| { type: "draft"; draft: PendingDraft | null; cursor?: string; turns?: number }
 	| { type: "repair"; repair: RepairState }
-	| { type: "import"; sourceId: string; fingerprint: string };
+	| { type: "import"; sourceId: string; fingerprint: string }
+	| { type: "native"; native?: { at: string; ttlMs: number } };
 export type JournalEvent = {
 	schema: 2; eventId: string; operationId: string; at: string;
 	baseRevision: number; changes: JournalChange[]; requestFingerprint?: string;
@@ -160,7 +162,9 @@ export type JournalProjection = {
 	schema: 2; revision: number; entries: Record<string, MemoryEntry>; history: MemoryEntry[];
 	operations: Record<string, string>; requests: Record<string, string>; eventIds: string[]; offers: Record<string, ReviewReceipt>; reviews: ReviewReceipt[];
 	generation: number; compactions: string[]; expiredIds: string[];
-	imports: Record<string, string>; draft: PendingDraft | null; cursor?: string; repair?: RepairState;
+	imports: Record<string, string>; draft: PendingDraft | null; turns: number;
+	/** One-shot explicit native request, expired by its own timestamp. */
+	native?: { at: string; ttlMs: number }; cursor?: string; repair?: RepairState;
 };
 
 /** Total number of lines across draft sections. */

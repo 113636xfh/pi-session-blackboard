@@ -14,7 +14,7 @@ export function canonical(value: unknown): string {
 }
 export function emptyProjection(): JournalProjection {
   return { schema: 2, revision: 0, entries: {}, history: [], operations: {}, requests: {}, eventIds: [], offers: {}, reviews: [],
-    generation: 0, compactions: [], expiredIds: [], imports: {}, draft: null };
+    generation: 0, compactions: [], expiredIds: [], imports: {}, draft: null, turns: 0 };
 }
 const assert = (condition: unknown, message: string): void => { if (!condition) throw new Error(`Blackboard journal: ${message}`); };
 const own = (object: object, key: string) => Object.hasOwn(object, key);
@@ -85,7 +85,10 @@ export function reduceEvent(previous: JournalProjection, event: JournalEvent): J
         assert(!next.reviews.some(review => review.id === change.receipt.id), 'duplicate review ID');
         next.reviews.push(structuredClone(change.receipt));
         break;
-      case 'draft': next.draft = structuredClone(change.draft); next.cursor = change.cursor; break;
+      case 'draft':
+        next.draft = structuredClone(change.draft); next.cursor = change.cursor;
+        if (change.turns !== undefined) { assert(Number.isSafeInteger(change.turns) && change.turns >= 0, 'invalid turn counter'); next.turns = change.turns; }
+        break;
       case 'repair':
         assert(change.repair.generation === next.generation, 'repair belongs to another generation');
         assert(Number.isInteger(change.repair.extraRequests) && change.repair.extraRequests >= (next.repair?.extraRequests ?? 0) && change.repair.extraRequests <= 2, 'repair allowance cannot reset or exceed two');
@@ -94,6 +97,9 @@ export function reduceEvent(previous: JournalProjection, event: JournalEvent): J
         assert(validKey(change.sourceId) && typeof change.fingerprint === 'string' && /^[a-f0-9]{64}$/.test(change.fingerprint), 'invalid import marker');
         assert(!own(next.imports, change.sourceId) || next.imports[change.sourceId] === change.fingerprint, 'import source changed');
         next.imports[change.sourceId] = change.fingerprint; break;
+      case 'native':
+        next.native = change.native ? structuredClone(change.native) : undefined;
+        break;
       default: throw new Error('Blackboard journal: unknown change');
     }
   }
@@ -109,7 +115,7 @@ export function replayEvents(events: JournalEvent[]): JournalProjection {
 export function toBoard(projection: JournalProjection): Board {
   const board = emptyBoard();
   board.generation = projection.generation; board.revision = projection.revision;
-  for (const entry of Object.values(projection.entries)) if (entry.validity === 'active') {
+  for (const entry of Object.values(projection.entries)) if (entry.validity === 'active' && !entry.legacyUnscoped) {
     board.sections[entry.section].push({ ...entry, ts: entry.updatedAt });
   }
   return board;
@@ -150,12 +156,12 @@ export function planCommit(projection: JournalProjection, inputs: CommitInput[],
     assert(!targets.has(id), 'a batch cannot revise the same entry twice'); targets.add(id);
     const entry: MemoryEntry = {
       id, revision: (old?.revision ?? 0) + 1, section: section!, text,
-      createdAt: old?.createdAt ?? at, updatedAt: at, order: projection.revision + 1,
+      createdAt: old?.createdAt ?? at, updatedAt: at, order: (projection.revision + 1) * 1000 + index,
       validity: input.validity ?? old?.validity ?? 'active', epistemic: input.epistemic ?? old?.epistemic ?? 'stated',
       origin: input.origin ?? old?.origin ?? 'assistant', sources: input.sources ?? old?.sources ?? [],
       archived: old?.archived ?? false,
       ...(old?.retention ? { retention: old.retention } : {}),
-      ...(input.taskState ?? old?.taskState ? { taskState: input.taskState ?? old?.taskState } : {}),
+      ...((input.taskState ?? old?.taskState ?? (section === 'next' ? 'todo' : undefined)) ? { taskState: input.taskState ?? old?.taskState ?? 'todo' } : {}),
       ...(input.verification ?? old?.verification ? { verification: input.verification ?? old?.verification } : {}),
       ...(input.legacyUnscoped ?? old?.legacyUnscoped ? { legacyUnscoped: true } : {}),
     };
@@ -204,6 +210,12 @@ export function consumeCompaction(previous: JournalProjection, compactionId: str
   }
   next.compactions.push(compactionId); next.generation++; next.revision++; delete next.repair;
   return next;
+}
+export function nativeRequestFresh(projection: JournalProjection): boolean {
+  const request = projection.native;
+  if (!request) return false;
+  const at = Date.parse(request.at);
+  return Number.isFinite(at) && Date.now() - at <= request.ttlMs;
 }
 export function replayBranch(branch: BranchEntry[]): JournalProjection {
   let projection = emptyProjection();

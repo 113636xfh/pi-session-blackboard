@@ -11,6 +11,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 
 import { replayBranch, planCommit, appendTransaction, newEvent } from '../build/journal.js';
+import extension from '../build/index.js';
 const PROBE_TYPE = 'sbb-sdk-contract';
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 const textOf = message => typeof message.content === 'string' ? message.content
@@ -136,6 +137,26 @@ test('event projections isolate real SDK tree, fork, branch clone and reset', t 
   appendTransaction(adapter(fork), fork, newEvent(replayBranch(fork.getBranch()), [{ type: 'reset' }], 'fork-reset'));
   assert.deepEqual(text(fork), []); assert.deepEqual(text(original), ['Shared ancestor', 'B_ONLY']);
   manager.branch(leafA); assert.deepEqual(text(manager), ['Shared ancestor', 'A_ONLY']);
+});
+
+test('pi 1.3: a context_edit invalidates an already-issued review credential', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'sbb-edit-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const manager = SessionManager.inMemory();
+  const root = manager.appendMessage({ role: 'user', content: 'Original synthetic constraint', timestamp: 1700000000000 });
+  const tools = {};
+  extension({ on: () => () => {}, registerTool: tool => { tools[tool.name] = tool; }, registerCommand: () => {},
+    getActiveTools: () => [], setActiveTools: () => {},
+    appendEntry: (type, data) => { manager.appendCustomEntry(type, data); } });
+  const ctx = { cwd: dir, sessionManager: manager, ui: { notify: () => {} } };
+  const call = (params, id) => tools.blackboard.execute(id, params, undefined, undefined, ctx);
+  const offer = (await call({ action: 'review' }, 'review-1')).details.credential;
+  assert(offer.range.some(source => source.entryId === root));
+  await call({ action: 'commit', entries: [{ section: 'goal', text: 'Review only' }, { section: 'next', text: 'Check parser', taskState: 'todo' }], review: { id: offer.id, constraintsChecked: true, executionChecked: true, goalChecked: true } }, 'commit-1');
+  manager.appendContextEdit(root, { content: 'Changed synthetic constraint' });
+  const fresh = (await call({ action: 'review' }, 'review-2')).details.credential;
+  assert.notEqual(fresh.range.find(source => source.entryId === root).fingerprint, offer.range.find(source => source.entryId === root).fingerprint);
+  await assert.rejects(() => call({ action: 'commit', review: { id: offer.id, constraintsChecked: true, executionChecked: true, goalChecked: true } }, 'commit-2'), /content changed/);
 });
 
 test('pi 1.3: getEntries includes abandoned paths; projected source can change without changing its ID', () => {

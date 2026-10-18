@@ -8,7 +8,7 @@ import { commitWithCache, WriterLocks } from '../build/storage.js';
 import { exportOptions } from '../build/export.js';
 import { inspectLegacy, migrateLegacy } from '../build/migration.js';
 import { sourceRefs } from '../build/coverage.js';
-import { emptyProjection, planCommit } from '../build/journal.js';
+import { emptyProjection, planCommit, replayBranch, newEvent } from '../build/journal.js';
 
 export function harness(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'sbb-runtime-'));
@@ -25,7 +25,7 @@ export function harness(t) {
   const notices = [], ctx = { cwd, sessionManager: manager, ui: { notify: (...args) => notices.push(args), confirm: async () => true } };
   t.after(async () => { await hooks.session_shutdown?.({}, ctx); rmSync(cwd, { recursive: true, force: true }); });
   const invoke = (params, id = `call-${branch.length}`) => tools.blackboard.execute(id, params, undefined, undefined, ctx);
-  return { cwd, pi, tools, hooks, commands, branch, manager, ctx, invoke, notices, active: () => active };
+  return { cwd, pi, tools, hooks, commands, branch, manager, ctx, invoke, notices, active: () => active, projection: () => replayBranch(branch) };
 }
 test('runtime commits and shows only event state without creating Markdown or default cache', async t => {
   const h = harness(t);
@@ -112,6 +112,165 @@ test('explicit Markdown export verifies quoted Windows-like paths, refuses overw
   await h.commands.bb.handler(`export --output "${path}" --overwrite`, h.ctx);
   assert(readFileSync(path, 'utf8').includes('Original accepted note'));
   assert.equal(existsSync(join(h.cwd, 'boards', 'synthetic.md')), false);
+});
+
+test('turn_end collects actual source IDs and only successful edits; early reminder rides an existing request', async t => {
+  const h = harness(t);
+  h.branch.push({ type: 'message', id: 'assistant-call', message: { role: 'assistant', content: [
+    { type: 'toolCall', id: 'edit-1', name: 'edit', arguments: { path: 'src/Good.ts' } },
+    { type: 'toolCall', id: 'edit-2', name: 'edit', arguments: { path: 'src/Bad.ts' } },
+  ] } });
+  h.branch.push({ type: 'message', id: 'ok-result', message: { role: 'toolResult', toolCallId: 'edit-1', toolName: 'edit', isError: false, content: 'edited' } });
+  h.branch.push({ type: 'message', id: 'bad-result', message: { role: 'toolResult', toolCallId: 'edit-2', toolName: 'edit', isError: true, content: 'Error: not found' } });
+  await h.hooks.turn_end({ messageEntryId: 'assistant-call', toolResultEntryIds: ['ok-result', 'bad-result'] }, h.ctx);
+  const offer = (await h.invoke({ action: 'review' })).content[0].text;
+  assert(offer.includes('MODIFIED src/Good.ts')); assert(!offer.includes('MODIFIED src/Bad.ts'));
+  assert(offer.includes('ERROR')); assert(offer.includes('ok-result'));
+  h.ctx.getContextUsage = () => ({ tokens: 20000, contextWindow: 64000 });
+  const reminder = await h.hooks.before_agent_start({}, h.ctx);
+  assert(reminder.message.content.includes('pause task expansion'));
+  assert(!reminder.message.content.includes('20000'));
+});
+
+test('urgent memory requests are bounded to two and stop as soon as explicit review succeeds', async t => {
+  const h = harness(t);
+  h.ctx.getContextUsage = () => ({ tokens: 20000, contextWindow: 64000 });
+  const boundary = { outcome: 'completed', context: { canContinue: true, llmMessages: [] } };
+  const first = await h.hooks.agent_before_settle(boundary, h.ctx); assert.equal(first.continue, true);
+  assert.equal(await h.hooks.agent_before_settle(boundary, h.ctx), undefined, 'queued request must not be queued again');
+  await h.hooks.context({ messages: [] }, h.ctx);
+  const credential = JSON.parse(first.entries[0].content.split('\n').at(-1)).credential;
+  const accepted = await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Review only' }, { section: 'next', text: 'Inspect parser', taskState: 'todo' }], review: { id: credential.id, constraintsChecked: true, executionChecked: true, goalChecked: true } }, 'successful-repair');
+  assert.equal(accepted.terminate, true);
+  assert.equal(await h.hooks.agent_before_settle(boundary, h.ctx), undefined);
+});
+test('failed urgent tool calls retain the allowance; a compaction retry spends the second and then falls back', async t => {
+  const h = harness(t); h.ctx.getContextUsage = () => ({ tokens: 20000, contextWindow: 64000 });
+  const boundary = { outcome: 'completed', context: { canContinue: true, llmMessages: [] } };
+  const compact = { reason: 'threshold', preparation: { firstKeptEntryId: null, tokensBefore: 40000 } };
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Review only' }, { section: 'next', text: 'Inspect parser', taskState: 'todo' }], review: undefined, operationId: 'seed' });
+  await h.invoke({ action: 'review' });
+  assert.equal((await h.hooks.agent_before_settle(boundary, h.ctx)).continue, true);
+  await h.hooks.context({ messages: [] }, h.ctx);
+  assert.equal((await h.invoke({ action: 'commit', entries: [{ section: 'invalid', text: 'Bad entry' }] }, 'failure-0')).isError, true);
+  // A repeated threshold check re-opens exactly one more request, not an unbounded loop.
+  assert.deepEqual(await h.hooks.session_before_compact(compact, h.ctx), { cancel: true });
+  const second = await h.hooks.agent_before_settle(boundary, h.ctx);
+  assert.equal(second?.continue, true, 'the deferred repair is delivered by the running turn boundary');
+  await h.hooks.context({ messages: [] }, h.ctx);
+  assert.equal((await h.invoke({ action: 'commit', entries: [{ section: 'invalid', text: 'Bad entry' }] }, 'failure-1')).isError, true);
+  assert.equal(await h.hooks.session_before_compact(compact, h.ctx), undefined, 'allowance exhausted -> honest native flow');
+  assert.equal(await h.hooks.agent_before_settle(boundary, h.ctx), undefined);
+  assert.equal((await h.hooks.tool_call({ toolName: 'write' }, h.ctx)).block, true);
+});
+test('user abort does not become a hidden continuation and does not refund the spent request', async t => {
+  const h = harness(t); h.ctx.getContextUsage = () => ({ tokens: 20000, contextWindow: 64000 });
+  const boundary = { outcome: 'completed', context: { canContinue: true, llmMessages: [] } };
+  assert.equal((await h.hooks.agent_before_settle(boundary, h.ctx)).continue, true);
+  await h.hooks.agent_before_settle({ outcome: 'aborted', context: { canContinue: true, llmMessages: [] } }, h.ctx);
+  assert.equal(await h.hooks.agent_before_settle({ outcome: 'aborted', context: { canContinue: true, llmMessages: [] } }, h.ctx), undefined);
+  const ok = await h.hooks.agent_before_settle(boundary, h.ctx);
+  assert.equal(ok.continue, true, 'the next compaction retry can still deliver the owed repair');
+});
+test('restarting the extension does not reset the two-request allowance', async t => {
+  const h = harness(t); h.ctx.getContextUsage = () => ({ tokens: 20000, contextWindow: 64000 });
+  const boundary = { outcome: 'completed', context: { canContinue: true, llmMessages: [] } };
+  await h.hooks.agent_before_settle(boundary, h.ctx);
+  await h.hooks.session_before_compact({ reason: 'threshold', preparation: { firstKeptEntryId: null, tokensBefore: 40000 } }, h.ctx);
+  await h.hooks.agent_before_settle(boundary, h.ctx);
+  // Fresh runtime over the same session events: the allowance lives in the journal, not memory.
+  const tools2 = {}, hooks2 = {};
+  extension({ on: (name, fn) => { hooks2[name] = fn; }, registerTool: tool => { tools2[tool.name] = tool; }, registerCommand: () => {},
+    getActiveTools: () => [], setActiveTools: () => {}, appendEntry: (type, data) => h.branch.push({ id: `n-${h.branch.length}`, parentId: h.branch.at(-1)?.id ?? null, type: 'custom', customType: type, data }) });
+  assert.equal(await hooks2.agent_before_settle(boundary, h.ctx), undefined);
+  assert.equal(await hooks2.session_before_compact({ reason: 'threshold', preparation: { firstKeptEntryId: null, tokensBefore: 40000 } }, h.ctx), undefined);
+});
+
+test('coverage follows the real cut: only content leaving the retained tail is required', async t => {
+  const h = harness(t); h.ctx.getContextUsage = () => ({ tokens: 20000, contextWindow: 64000 });
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Review only' }, { section: 'next', text: 'Inspect parser', taskState: 'todo' }] });
+  h.branch.push({ type: 'message', id: 'old-user', message: { role: 'user', content: 'Old synthetic request' } });
+  h.branch.push({ type: 'message', id: 'new-user', message: { role: 'user', content: 'Newer synthetic request stays in the tail' } });
+  // Cut points at the newest entry: everything else leaves the tail and must be reviewed.
+  assert.deepEqual(await h.hooks.session_before_compact({ reason: 'threshold', preparation: { firstKeptEntryId: 'new-user', tokensBefore: 40000 } }, h.ctx), { cancel: true });
+  const repair = h.projection?.repair;
+  const delivered = await h.hooks.agent_before_settle({ outcome: 'completed', context: { canContinue: true, llmMessages: [] } }, h.ctx);
+  assert.equal(delivered?.continue, true, 'the deferred repair is delivered by the running turn');
+  await h.hooks.context({ messages: [] }, h.ctx);
+  assert.equal((await h.invoke({ action: 'review' })).details.credential.range.some(source => source.entryId === 'new-user'), true);
+});
+test('review ranges are recomputed and own metadata never counts as user content', async t => {
+  const h = harness(t);
+  h.branch.push({ type: 'message', id: 'context-edit-target', message: { role: 'user', content: 'Original synthetic text' } });
+  const first = (await h.invoke({ action: 'review' })).details.credential;
+  assert.deepEqual(first.range.map(source => source.kind), ['user', 'user'], 'both synthetic user messages, never the injected checkpoint');
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Read only' }, { section: 'next', text: 'Check parser', taskState: 'todo' }], review: { id: first.id, constraintsChecked: true, executionChecked: true, goalChecked: true } }, 'reviewed-v1');
+  const second = (await h.invoke({ action: 'review' })).details.credential;
+  assert(!second.range.some(source => source.kind === 'assistant' && !source.fingerprint), 'own notes are not source contributions');
+  assert(second.range.every(source => source.entryId && source.fingerprint));
+});
+
+test('ready blackboard takes over compaction with zero summarizer calls; retention is consumed by the real node', async t => {
+  const h = harness(t);
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Review only; not approved to implement' }, { section: 'next', text: 'Inspect parser', taskState: 'todo' }] });
+  const offer = (await h.invoke({ action: 'review' })).details.credential;
+  await h.invoke({ action: 'commit', review: { id: offer.id, constraintsChecked: true, executionChecked: true, goalChecked: true } }, 'covered');
+  const result = await h.hooks.session_before_compact({ reason: 'threshold', preparation: { firstKeptEntryId: null, tokensBefore: 40000 } }, h.ctx);
+  assert(result.compaction.summary.includes('Review only; not approved to implement'));
+  assert.equal(result.compaction.details.generator, 'pi-session-blackboard');
+  assert.equal(result.compaction.tokensBefore, 40000);
+});
+test('over-budget summaries are repairable; overflow without coverage falls back natively with a stated reason', async t => {
+  const h = harness(t); h.ctx.getContextUsage = () => ({ tokens: 20000, contextWindow: 64000 });
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Review only' }, { section: 'next', text: 'Inspect parser', taskState: 'todo' }] });
+  const offer = (await h.invoke({ action: 'review' })).details.credential;
+  await h.invoke({ action: 'commit', review: { id: offer.id, constraintsChecked: true, executionChecked: true, goalChecked: true } }, 'covered');
+  const compact = (reason = 'threshold') => h.hooks.session_before_compact({ reason, preparation: { firstKeptEntryId: null, tokensBefore: 40000 } }, h.ctx);
+  assert.equal((await compact()).compaction.details.generator, 'pi-session-blackboard');
+  // A ready board is taken over even on overflow: that is the zero-summarizer win.
+  assert.equal((await compact('overflow')).compaction.details.generator, 'pi-session-blackboard');
+  // A fresh unreviewed message makes the board unready; overflow must not defer.
+  h.branch.push({ type: 'message', id: 'unreviewed', message: { role: 'user', content: 'New constraint arrives' } });
+  assert.equal(await compact('overflow'), undefined);
+  assert(h.notices.at(-1)[0].includes('overflow') && h.notices.at(-1)[0].includes('Native summary used'));
+});
+
+test('a summary that cannot fit its budget asks for a shorter sourced version instead of falling back', async t => {
+  const h = harness(t); h.ctx.getContextUsage = () => ({ tokens: 1000, contextWindow: 64000 });
+  writeFileSync(join(h.cwd, '.pi/settings.json'), JSON.stringify({ 'session-blackboard': { boardDir: join(h.cwd, 'boards'), compaction: 'board', seedFromPriorSummary: false, summaryMaxChars: 1000 } }));
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'x'.repeat(4000) + ' NOT VERIFIED', retain: true }, { section: 'next', text: 'Inspect', taskState: 'todo' }] });
+  const offer = (await h.invoke({ action: 'review' })).details.credential;
+  await h.invoke({ action: 'commit', review: { id: offer.id, constraintsChecked: true, executionChecked: true, goalChecked: true } }, 'covered');
+  const s = h.projection();
+  assert(Object.values(s.entries).some(entry => entry.retention), 'retained entry must be protected, not silently omitted');
+  assert.deepEqual(await h.hooks.session_before_compact({ reason: 'threshold', preparation: { firstKeptEntryId: null, tokensBefore: 40000 } }, h.ctx), { cancel: true });
+});
+
+test('explicit native request is obeyed once and expires; manual custom instructions are honoured', async t => {
+  const h = harness(t);
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Review only' }, { section: 'next', text: 'Inspect', taskState: 'todo' }] });
+  const offer = (await h.invoke({ action: 'review' })).details.credential;
+  await h.invoke({ action: 'commit', review: { id: offer.id, constraintsChecked: true, executionChecked: true, goalChecked: true } }, 'covered');
+  const compact = reason => h.hooks.session_before_compact({ reason, preparation: { firstKeptEntryId: null, tokensBefore: 40000 } }, h.ctx);
+  await h.commands.bb.handler('native', h.ctx);
+  assert.equal(await compact('threshold'), undefined, 'explicit native request wins');
+  assert.equal((await compact('threshold')).compaction.details.generator, 'pi-session-blackboard', 'the one-shot is consumed, not sticky');
+  // An expired request never blocks a later takeover.
+  change_native: {
+    const expired = newEvent(replayBranch(h.branch), [{ type: 'native', native: { at: '2020-01-01T00:00:00Z', ttlMs: 1000 } }], 'expired');
+    h.branch.push({ id: `n-${h.branch.length}`, parentId: h.branch.at(-1)?.id ?? null, type: 'custom', customType: 'sbb-event', data: expired });
+    assert.equal((await compact('threshold')).compaction.details.generator, 'pi-session-blackboard');
+  }
+});
+test('cancelling the owed repair stops further asks instead of silently continuing', async t => {
+  const h = harness(t); h.ctx.getContextUsage = () => ({ tokens: 20000, contextWindow: 64000 });
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Review only' }, { section: 'next', text: 'Inspect', taskState: 'todo' }] });
+  const boundary = { outcome: 'completed', context: { canContinue: true, llmMessages: [] } };
+  assert.equal((await h.hooks.agent_before_settle(boundary, h.ctx))?.continue, true);
+  await h.commands.bb.handler('cancel-repair', h.ctx);
+  h.branch.push({ type: 'message', id: 'more', message: { role: 'user', content: 'Unreviewed request' } });
+  assert.equal(await h.hooks.agent_before_settle(boundary, h.ctx), undefined);
+  assert.equal(await h.hooks.session_before_compact({ reason: 'threshold', preparation: { firstKeptEntryId: null, tokensBefore: 40000 } }, h.ctx), undefined);
 });
 
 test('cooperating writers cannot share a session lock, and release does not delete another owner', t => {
