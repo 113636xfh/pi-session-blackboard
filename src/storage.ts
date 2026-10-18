@@ -11,8 +11,22 @@ import type { JournalEvent } from './types.js';
 export function atomicWrite(path: string, text: string): void {
   mkdirSync(dirname(path), { recursive: true });
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  try { writeFileSync(temp, text, { flag: 'wx' }); renameSync(temp, path); }
-  finally { rmSync(temp, { force: true }); }
+  try {
+    writeFileSync(temp, text, { flag: 'wx' });
+    // Windows can briefly deny a replace while another handle (indexer, editor) still holds the
+    // target; retry a few times before reporting a real failure.
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try { renameSync(temp, path); return; }
+      catch (error) {
+        lastError = error;
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES') break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10 * (attempt + 1));
+      }
+    }
+    throw lastError;
+  } finally { rmSync(temp, { force: true }); }
 }
 export function writeProjectionCache(path: string, projection: JournalProjection, branchKey: string): void {
   atomicWrite(path, JSON.stringify({ schema: 2, branchKey, projection }));
