@@ -1,540 +1,239 @@
 # pi-session-blackboard
 
-**pi's compaction summary, turned from a model call into a file render.**
+**Session notes that survive compaction, and a compaction summary that costs zero summarizer calls — when the notes are good enough to earn it.**
 
-The extension keeps a per-session *blackboard* — a plain markdown file of curated
-facts. Every turn it extracts candidate facts deterministically (pure TS, no LLM),
-hands the draft to the agent for review, and writes what survives to disk. When
-compaction fires, **that file is the summary**: pi's summarization call is skipped
-entirely, and pi's own cut-point, retained tail and compaction entry are untouched.
+The extension keeps a per-session set of notes (*the blackboard*) as **pi session
+events**: branch-local, append-only, invisible to the model until rendered. Every
+turn it extracts candidate facts deterministically (pure TS, no LLM) and asks the
+agent to review them. When compaction fires, the notes are rendered **only if**
+they provably cover the content that is about to leave pi's retained tail;
+otherwise the extension asks the current model for one bounded memory repair, and
+falls back to pi's native summary if that repair cannot be done safely.
 
-> ⚠️ **The trade-off, before you rely on it.** `"board"` mode skips the
-> summarization call and makes the summary deterministic, but the summary is then
-> a render of what was committed. An LLM summary also re-narrates the
-> conversation, and that narrative is what you give up: tone, hedging,
-> half-formed reasoning, anything never written down. The facts themselves stay.
-> What you can still fall back on: pi's retained tail is verbatim, superseded and
-> rotated lines stay on disk and are searchable via `blackboard_recall` (the live
-> board, `archive/`, and the snapshot digests) or `/bb show`, and a board with
-> fewer than 3 real entries falls back to native summarization. The default
-> `compaction: "off"` never touches pi's native flow. The core path is covered by
-> a 54-check smoke suite and by daily use in real sessions. Feedback in
-> [issues](https://github.com/113636xfh/pi-session-blackboard/issues) is welcome;
-> also read [Known limitations](#known-limitations).
+Every claim below is meant to be falsifiable. The wording is deliberately weaker
+than in 0.2: "the facts are on the board" is never a promise that the facts were
+captured, and "zero summarizer calls" is conditional on the coverage gate.
 
-[![test](https://github.com/113636xfh/pi-session-blackboard/actions/workflows/test.yml/badge.svg)](https://github.com/113636xfh/pi-session-blackboard/actions/workflows/test.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 中文文档: [README.zh.md](README.zh.md)
 
 | | pi's native compaction | this extension (`"compaction": "board"`) |
 |---|---|---|
-| summarization model call | one per compaction | **none** |
-| wall clock (one local box, W4A16 27B over PCIe) | > 3 min, did not finish | **0.0 s** |
-| exact facts (paths, symbols, error text) | whatever the model kept | whatever the agent committed |
-| inspectable after the fact | no | a markdown file you can `grep` |
-| background LLM calls | — | **never** |
+| summarizer model call | one per compaction | **none**, once coverage is established |
+| extra model requests before a compaction | 0 | **at most 2**, only when the notes are incomplete |
+| what the summary contains | whatever the summarizer kept | exactly the notes the agent committed |
+| inspectable / greppable afterwards | no | yes — events, `blackboard_recall`, `/bb show`, `/bb export` |
+| background LLM calls | — | **none** (assist is opt-in) |
 
 ## Contents
 
-- [Why](#why)
 - [Install](#install)
-- [Enable board mode](#enable-board-mode)
-- [What you actually see](#what-you-actually-see)
-- [How it works](#how-it-works)
-- [The board](#the-board)
-- [Searching past the summary](#searching-past-the-summary)
-- [Where things live](#where-things-live)
+- [Modes](#modes)
+- [The loop you actually see](#the-loop-you-actually-see)
+- [Compaction policy](#compaction-policy)
+- [Commands and tools](#commands-and-tools)
+- [Data layout and recovery](#data-layout-and-recovery)
+- [Migrating from 0.2](#migrating-from-02)
 - [Configuration](#configuration)
 - [Cost model](#cost-model)
-- [Compatibility](#compatibility)
-- [Development](#development)
+- [Tests](#tests)
 - [Known limitations](#known-limitations)
-- [Acknowledgements & license](#acknowledgements--license)
-
-## Why
-
-pi's native compaction calls a summarization model to compress the older history
-into one block of text. Two costs:
-
-1. **It is the most expensive call in the loop.** On a local model (W4A16 27B
-   over PCIe) it did not finish inside 3 minutes.
-2. **It drops the facts you need after compaction.** File paths, function names
-   and exact error text are the first things a prose summary paraphrases or
-   loses.
-
-This package does not try to write a better summary. It changes the **source of
-information**: the facts are already in the session, so they are mined every
-turn by deterministic code, curated by the agent itself (the only step that needs
-semantic judgement: a regex cannot tell "this decision is dead" from "this
-decision still holds"), and stored as one line per fact. Compaction then renders
-that file.
+- [License](#license)
 
 ## Install
 
-pi can clone it for you, into `~/.pi/agent/git/github.com/113636xfh/…`, and
-write the entry into `~/.pi/agent/settings.json` itself:
-
 ```bash
 pi install git:github.com/113636xfh/pi-session-blackboard    # user-level; -l for project-level
-# restart pi — extensions load at process start
 ```
 
-Pin it if you want it frozen: `…/pi-session-blackboard@<tag-or-sha>`. `pi update
---extensions` reconciles an existing clone to the configured ref but does not
-move a pinned one.
+pi loads `src/index.ts` directly, so there is no build step for use. Development
+needs `npm install` (pi 1.3.0 is pinned as a dev dependency) and Node ≥ 22.19.0,
+which is what pi 1.3 itself requires.
 
-To read or hack on the source, clone it first and install the local path:
+## Modes
 
-```bash
-git clone https://github.com/113636xfh/pi-session-blackboard.git
-pi install ./pi-session-blackboard      # pi loads src/index.ts directly — no build step
-```
-
-`npm install && npm test` (typecheck + a 54-check smoke suite) is only needed
-for development. The extension is TypeScript loaded by pi's own extension
-loader, and `@earendil-works/pi-coding-agent` / `typebox` are aliased to pi's
-installed copies (`dist/core/extensions/loader.js` → `getAliases()`), which is
-why this package declares **no runtime dependencies**.
-
-Remove with `pi remove <name-as-shown-by-pi-list>`.
-
-If you reference the package from `settings.json` → `packages`, use the **bare
-string** form:
-
-```jsonc
-{ "packages": ["git:github.com/113636xfh/pi-session-blackboard"] }   // ✅
-{ "packages": ["../../pi-session-blackboard"] }                      // ✅ local path
-{ "packages": [{ "path": "../../pi-session-blackboard", "extensions": [] }] }  // ❌ disables every extension in it
-```
-
-An empty `extensions: []` means "explicitly none", not "no filter". Check with
-`pi list`: a `(filtered)` marker means the extension is not loading.
-
-## Enable board mode
-
-By default the extension only **assists**: native compaction still runs, and a
-capped deterministic board section is appended to the LLM summary. Board mode is
-one key away, in `~/.pi/agent/settings.json` (user) or `.pi/settings.json`
-(project, wins):
-
-```jsonc
-{
-  "session-blackboard": {
-    "compaction": "board"      // the board IS the summary; pi's summarization call is skipped
-  }
-}
-```
-
-Three modes:
-
-| `compaction` | what happens at compaction |
+| `compaction` | behaviour |
 |---|---|
-| `"off"` (default) | native flow untouched; if `compactAssist` is on (default), a capped board section is appended to the LLM summary |
-| `"digest"` | native flow untouched; a compact board digest is mirrored into the session JSONL first |
-| `"board"` | **the board is returned as the summary** — no summarization call. A thin board (< 3 real entries) returns `null` and the native flow runs unchanged |
+| `"off"` (default) | notes and tools work, compaction stays entirely native |
+| `"board"` | the notes become the summary **when coverage is established**; otherwise native, with a stated reason |
+| `"digest"` | kept only for migration: it no longer mirrors a digest, and warns |
 
-## What you actually see
+`compactAssist` is now **off** by default. When enabled it runs pi's own
+summarization and appends the notes, and it is used only for *manual* compaction
+that carries custom instructions — the one case where a deterministic render
+cannot honour "summarize with this focus".
 
-**1. A checkpoint arrives with your next prompt** (hidden message,
-`display: false`, so the TUI stays clean). It carries the deterministic draft, a
-countdown to compaction, and the instruction: *what you commit here is the
-summary.*
+## The loop you actually see
+
+**1. A hidden reminder rides your next prompt** (`display: false`, so the TUI
+stays clean). Near the compaction threshold it says so once, without a stale
+countdown:
 
 ```
 [session-blackboard checkpoint]
-[context pressure] compaction is 3.3k away — context is at 95.0k of 131k tokens
-(pi compacts above 98.3k = window − reserve 32.8k). NEAR COMPACTION — commit what
-matters from this turn onto the board NOW …
-The draft's deterministic lines (`MODIFIED …` / `COMMIT …`) land automatically with
-your next commit — do NOT retype them; reject one with dropDraft=["substring"].
-Every other draft line lands ONLY if you write it yourself in `entries`.
---- draft ---
-## Files
-- MODIFIED src/board.ts (commitEntries, renderCommitEcho)
-- COMMIT 93c32ad 手动原生压缩按钮 /bb compact
-## Issues
-- [ERROR] npm test: smoke: FAIL 1/46
---- end draft ---
+NEAR COMPACTION: pause task expansion and write important changes now.
+Call blackboard action=review to inspect the complete candidates and receive a
+content-bound credential; commit useful notes and explicitly confirm the reviewed
+range. skip only discards the draft and does not confirm coverage.
 ```
 
-**2. The agent reviews the draft**, corrects it, deletes what is wrong, and
-commits with `blackboard`:
+**2. The agent reviews and commits.** One call carries both halves:
 
 ```jsonc
-{ "action": "commit", "entries": [
-  { "section": "decisions", "text": "commit receipt returns only the new lines + 2 per section",
-    "supersedes": "commit returns the whole board" }
-], "dropDraft": ["[ERROR] npm test"] }
+{ "action": "commit",
+  "entries": [
+    { "section": "decisions", "text": "coverage is bound to pi's cut, not the whole branch",
+      "supersedes": "coverage requires the whole branch" }
+  ],
+  "review": { "id": "review-…", "constraintsChecked": true, "executionChecked": true, "goalChecked": true } }
 ```
 
-The mechanical draft does not have to be retyped: the deterministic lines
-(`MODIFIED …`, `COMMIT …`) land with this same commit, marked `~` in the receipt.
-The receipt itself stays small: your entries `+`, auto-accepted draft lines `~`,
-each preceded by its 2 nearest older entries (enough to pick the next
-`supersedes` substring):
+- `review` is optional; a plain commit is a note, **not** a claim that the range
+  was reviewed.
+- The credential comes from `action: "review"` and is bound to source-entry
+  content fingerprints, so editing a message (`/tree`, `context_edit`) invalidates
+  it: the review must be redone.
+- Entries are one line each, complete — nothing is truncated to fit. A note that
+  does not fit the summary budget is reported as a problem, never shortened.
+
+**3. The receipt is small and ID-addressed**:
 
 ```
-Committed 3 entries (2 auto-accepted from the mechanical draft). Blackboard v7.
-1 draft line did NOT land (draftOnCommit="deterministic" leaves them to you) — the draft is now cleared; rewrite them in the next commit if they matter.
-Replaced entries archived → archive/<sid>/superseded-20261008-134102.md (still searchable via blackboard_recall).
-
-Board after commit — your entries (+) and auto-accepted draft lines (~), each preceded by its 2 nearest older entries:
-
-## Decisions — 1 new
-  [2026-10-08 13:02] board mode returns the board as the summary
-  [2026-10-08 13:20] supersedes must name a unique substring
-+ [2026-10-08 13:41] commit receipt returns only the new lines + 2 per section
-
-## Files — 2 new
-  [2026-10-08 13:02] MODIFIED src/summary.ts (renderSummary)
-  [2026-10-08 13:20] MODIFIED src/recall.ts (searchDigest)
-~ [2026-10-08 13:41] MODIFIED src/board.ts (commitEntries, renderCommitEcho)
-~ [2026-10-08 13:41] COMMIT 93c32ad 手动原生压缩按钮 /bb compact
-
-Full board: ~/.pi/agent/blackboard/<sid>.md — use action="show" or blackboard_recall, do not re-read the file.
+Committed v7.
+m-4f2a9c1e5b7d@2 [decisions] coverage is bound to pi's cut, not the whole branch
+Use blackboard show/recall or /bb; there is no default board file.
 ```
 
-**3. `/bb` shows the current state** at any time:
+## Compaction policy
 
-```
-blackboard: ~/.pi/agent/blackboard/<sid>.md
-v7 | updated: 2026-10-08 13:41 | entries: 22 (+3 archive pointers) | turns since checkpoint: 1 | pending draft: 4 lines
-compaction: board | 3.3k tokens left until pi's native trigger
-```
+In `"board"` mode `session_before_compact` asks one question: *do the notes cover
+the entries that this preparation actually drops?* Only content before
+`preparation.firstKeptEntryId` counts — the retained tail does not need to be
+re-summarized.
 
-## How it works
-
-![The per-turn curation loop](docs/images/01-loop-en.png)
-
-Three parts, and only the second one involves a model:
-
-1. **Extraction — deterministic, every turn.** Pure TS scans only the session
-   entries since the last cursor: goal/scope, preferences, `MODIFIED <path>
-   (symbols)` from successful `edit`/`write`, `COMMIT <hash> <subject>` from
-   successful `git commit`, `[ERROR] <cmd>: <first error line>` from failed
-   shells, decision/finding/next-step phrasing from assistant prose. It runs in
-   milliseconds and makes no network calls.
-2. **Review — the agent, inside its own turn.** The draft is injected with your
-   next message (`delivery: "next-turn"`, zero extra API calls) or immediately
-   as a steer (`"immediate"`). The agent commits the survivors or skips.
-3. **Archival — mechanical.** Per-section overflow rotates into append-only
-   archive files; every commit mirrors a compact digest into the session JSONL
-   (`sbb-snapshot` custom entries — never in LLM context, permanently searchable).
-
-The extension also marks an open issue `[RESOLVED <ts>]` once the file it
-references is modified.
-
-### Draft and commit are one call
-
-Mechanical extraction never writes to the board by itself; it fills a **pending
-draft**. What used to happen: the draft was displayed, then discarded, so a mined
-fact survived only if the agent retyped it. Measured over 70 debug logs and 26
-real boards: 258 turns produced **2013 draft lines**, there were 143 commits, and
-the boards kept just **12** `MODIFIED`/`COMMIT` lines against 528 agent-written
-ones (2.2%). The deterministic facts were the ones being lost, and retyping the
-rest costs output tokens (mean draft 7.6 lines, median 5, p90 17, max 45).
-
-A commit now carries both halves:
-
-| part | what it is |
+| situation | what happens |
 |---|---|
-| `entries` | what the agent writes itself — its decisions, findings, corrections |
-| auto-accepted draft | `draftOnCommit: "deterministic"` (default): only the zero-heuristic extractor output, `MODIFIED <path> (symbols)` and `COMMIT <hash> <subject>` |
-| `dropDraft: ["substring"]` | the draft lines the agent **rejects** — case-insensitive, no retyping |
+| coverage established, summary fits | the board is returned as the summary. **Zero** summarizer calls |
+| gaps, allowance left, headroom measured | `{ cancel: true }`, and the *running turn* delivers one memory-only request (`agent_before_settle` + `continue`) — never a nested model call from inside the hook |
+| gaps, allowance exhausted | native summary, with an explicit reason in the UI, the journal and the diagnostics log |
+| context already overflowed | native summary — there is no headroom to spend on a repair turn |
+| manual compaction with custom instructions | `compactAssist` (if enabled) so the instructions are honoured; otherwise the deterministic render |
+| explicit "native" request (`/bb native`) | obey once, five-minute TTL, then cleared |
+| user aborts | no hidden continuation; the spent request is not refunded and `/bb cancel-repair` stops further asks |
 
-The heuristic extractors (prose-mined decisions/findings/next, `[ERROR]` lines,
-preference patterns, scope changes) deliberately stay manual: they are starting
-points and they do produce false positives. `draftOnCommit: "all"` flips it so
-the whole draft lands and the agent only culls; `"none"` restores
-retype-everything.
+The repair allowance is **two requests per compaction generation**, stored in the
+journal. Restarting pi, re-entering the threshold check, or a failed tool call
+never resets it. Delivery is only counted when a request actually reaches the
+provider (`context` event), so "we asked" and "the model saw it" are different
+states. During a repair request only the memory tools are callable, and the
+request terminates the turn afterwards — that bound is what keeps the cost
+predictable.
 
-Whatever the policy, the commit clears the draft and the receipt states how many
-draft lines did **not** land, so a dropped fact is visible rather than silent.
+## Commands and tools
 
-### Compaction: the board is the summary
+| entry point | purpose |
+|---|---|
+| `blackboard` tool | `commit`, `review`, `retain`, `show`, `archive`, `skip` |
+| `blackboard_recall` tool | literal search; `mode: current \| history \| session`, `limit`, `cursor` |
+| `/bb` | `show [section] [limit] [offset]`, `show <ID>`, `review`, `commit <JSON>`, `retain <ID> <revision>`, `archive <ID>`, `skip`, `reset`, `migrate [apply]`, `export --format markdown [--output "path"] [--overwrite]`, `native`, `cancel-repair`, `debug` |
 
-![Compaction takeover](docs/images/02-compaction-en.png)
+Pagination is real: a page that finds nothing says *"the scan is not finished"* and
+hands out a cursor; only a finished scan may say "no match". A cursor is bound to
+the branch leaf and note revision, so a changed branch invalidates it instead of
+silently returning stale rows. `history` mode shows replaced versions with their
+state — a superseded note never presents itself as current.
 
-`session_before_compact` returns:
+## Data layout and recovery
 
-```ts
-{ compaction: { summary: renderSummary(board),   // pi's own section shape
-                firstKeptEntryId, tokensBefore } }
-```
+- **Authoritative**: `sbb-event` custom entries in the session JSONL. They ride the
+  session tree, so `/tree`, fork, clone and reset inherit exactly the real
+  ancestry, and abandoned branches cannot leak into the current summary.
+- **Derived**: nothing is required. A projection-cache write failure reports
+  "committed; cache pending rebuild" and never invites a duplicate commit.
+- **Explicit only**: Markdown. `/bb export` writes a verified snapshot; edits to it
+  are never imported, and no session Markdown board is maintained.
 
-- **skips** pi's summarization call rather than duplicating it;
-- everything else stays pi's: cut-point, `keepRecentTokens` retained tail,
-  compaction entry, projection rebuild;
-- rendered in pi's native section names (`## Goal`, `## Constraints &
-  Preferences`, `## Key Decisions`, `## Key Findings`, `## Files & Changes`,
-  `## Open Issues`, `## Next Steps`) plus a footer: board file path, archive
-  directory, and how to use `blackboard_recall`;
-- **the footer is reserved before truncation**: when the board exceeds
-  `summaryMaxChars`, the oldest body lines go, never the retrieval instructions;
-- **a thin board never becomes a thin summary**: fewer than 3 real entries →
-  `null` → untouched native flow. Read/render errors fall back the same way.
+Recovery: corrupted or missing caches are ignored (state is replayed from events);
+a corrupt session stops takeover with an error instead of writing an empty board;
+an interrupted legacy migration is idempotent and keeps its byte-verified backup.
+Two pi processes cannot both write a session: the second is refused rather than
+merged.
 
-### `/bb compact`: the manual native button
+## Migrating from 0.2
 
-One switch sends the *next* compaction through pi's own summarization even in
-`"board"` mode:
+`/bb migrate` is a dry run: it lists files, sizes, hashes, candidate entries and
+missing archive pointers, and writes nothing. `/bb migrate apply` copies the old
+board, state and archives into `backups/<sid>/<hash>/`, verifies the copies byte
+for byte, then imports the lines as **legacy/unscoped, unknown** notes.
 
-1. the command arms a **one-shot** flag in the state file (5-minute TTL, so a
-   cancelled compaction cannot leave a bypass lying around);
-2. `session_before_compact` sees it and returns `undefined` → pi's native flow
-   runs untouched (its cut-point, retained tail, retry policy);
-3. `session_compact` then **merges that native summary back into the board**.
+Legacy notes are *not* current facts: they are excluded from the rendered summary
+until reviewed, and unknown sections or stray lines are preserved verbatim instead
+of being dropped. Until you migrate, `/bb show` says a legacy board exists and is
+not authoritative.
 
-So it costs one model call, and the board still gets the result. To make native
-the permanent choice, set `"compaction": "off"`.
-
-### Adoption: a native summary is never wasted
-
-On `session_start` and on `session_compact`, any summary pi produced by itself
-(from an earlier session before the extension was enabled, or from a fallback
-because the board was thin) is parsed into board entries and **merged**, oldest
-first. Three rules keep the merge safe:
-
-- the board's own summary is refused (marker in its title), so a board-mode
-  compaction can never be parsed back into itself;
-- **6 entries per section per merge** (newest kept); the rest go into a single
-  `adopted-<stamp>.md`;
-- exact case-insensitive dedupe against the board *and* against the archive
-  files, so re-merging the same summary is a no-op.
-
-### The countdown
-
-Every checkpoint message carries how far compaction is, computed the way pi
-computes it: `contextWindow − reserveTokens`, with `reserveTokens` resolved
-model-override → project settings → user settings → pi's built-in 16384. Inside
-`compactionWarnTokens` (default 32768) of that line the checkpoint switches to
-**every turn** — even with an empty draft — because the next turn may be the
-last one before the board becomes the summary. If the token count is unknown
-(right after a compaction), no line is printed rather than a guessed one.
-
-## The board
-
-One line per fact, auto-timestamped, capped at `maxEntryChars` (300):
-
-```markdown
-## Decisions
-- [2026-10-08 13:02] board mode returns the board as the summary: pi's cut-point and retained tail stay pi's
-```
-
-| Section | What lands there | Written by |
-|---|---|---|
-| `Goal` | the opening task; later only explicit pivots (`instead`, `actually`, `switch to`, …) as `[Scope change]` | extraction + review |
-| `Decisions` | choices **and why** — the review pass is what makes these worth reading | mostly the agent |
-| `Findings` | results of exploration/experiments: the measured number, the root cause, the gotcha | mostly the agent |
-| `Files` | `MODIFIED <path> (exported symbols)` and `COMMIT <hash> <subject>` — auto-accepted with each commit by default | deterministic |
-| `Issues` | `[ERROR] <cmd>: <first error line>`; auto-`[RESOLVED <ts>]` when the file gets fixed | extraction + review |
-| `Next` | the concrete next step | extraction + review |
-| `Prefs` | "always / never / prefer / please …" statements | extraction + review |
-| `Archived` | pointers to archive files, extension-managed, capped at 5 per section | extension |
-
-**A changed fact must not leave two versions on the board.** `commit` only
-dedupes exact matches, so editing a fact without `supersedes` leaves the stale
-line next to the new one, and the summary would carry both. `supersedes` names a
-unique substring of the line being replaced: it is archived in the same call
-(one file per commit, still recallable), a pointer line records it, and the new
-line becomes the only version the summary can show. An ambiguous or missing
-target is reported (the new line still lands) so the agent can retry with a
-longer substring.
-
-## Searching past the summary
-
-Once the board is the summary, the model needs a way to read below it.
-`blackboard_recall` greps, case-insensitively, in order: the live board → the
-archive files (newest first, up to 40) → the mirrored `sbb-snapshot` digests.
-
-The query is a **literal substring copied out of the conversation** (a path, an
-identifier, an error fragment), not a natural-language question. One line per
-hit, attributed to where it came from, newest last:
-
-```
-blackboard recall — 3 match(es) for "reserveTokens" (newest last):
-- [board · Decisions] - [2026-10-08 13:02] the countdown mirrors pi's reserve resolution …
-- [archive/board-20261002-064611220-0005.md · From: Goal] - [2026-10-02 14:46] …
-- [snapshot/2291@07-11-24 · Goal] main line: …
-```
-
-Digest hits are attributed to the board section the line came from (`recentFiles`
-reports `Files`); numbers and the `counts` object are skipped, since matching a
-count is noise. `full: true` dumps whole snapshots when you want the board
-state rather than a single fact.
-
-## Where things live
-
-You never manage these. The board is written only by the `blackboard` tool when
-the agent commits:
-
-| Path | Written by | Contents |
-|---|---|---|
-| `<boardDir>/<sessionId>.md` | `blackboard` tool (commit) | **the board** — plain markdown, stable section order, per-section budget |
-| `<boardDir>/archive/<sessionId>/board-<stamp>.md` | rotation | one file per overflow rotation, append-only |
-| `<boardDir>/archive/<sessionId>/superseded-<stamp>.md` | `supersedes` | one file per commit's replaced entries |
-| `<boardDir>/archive/<sessionId>/adopted-<stamp>.md` | adoption | entries beyond the per-merge budget |
-| `<boardDir>/state/<sessionId>.json` | extension | extraction cursor, pending draft, counters (atomic tmp+rename) |
-| `<boardDir>/debug/<sessionId>.ndjson` | extension, only with `"debugLog": true` | event log |
-| session JSONL (`sbb-snapshot`) | extension, `mirrorToSession` | compact digest, searchable by recall |
-
-Default `<boardDir>` is `<pi agent dir>/blackboard`. State, drafts, mirrors and
-digests **never enter the model context**: they are files and JSONL custom
-entries: greppable, committable, readable with the normal `read` tool (e.g.
-after a compaction).
+Rollback: uninstall (or pin) this package and re-enable 0.2; export first with
+`/bb export --output <path>` if you want a copy of the notes. v2 events stay in the
+session file and are ignored by 0.2. Nothing here upgrades your global pi.
 
 ## Configuration
 
-Key `"session-blackboard"` in `~/.pi/agent/settings.json` (user) or
-`.pi/settings.json` (project, wins per key):
+`~/.pi/agent/settings.json` (user) or `.pi/settings.json` (project, wins), key
+`session-blackboard`:
 
-```jsonc
-{
-  "session-blackboard": {
-    "enabled": true,
-    "checkpointTurns": 1,
-    "delivery": "next-turn",
-    "compaction": "off",
-    "compactionWarnTokens": 32768,
-    "maxEntriesPerSection": 40,
-    "maxEntryChars": 300,
-    "maxDraftLines": 60,
-    "draftOnCommit": "deterministic",
-    "commitContextEntries": 2,
-    "summaryMaxChars": 6000,
-    "compactAssist": true,
-    "compactAssistMaxChars": 4000,
-    "seedFromPriorSummary": true,
-    "mirrorToSession": true,
-    "boardDir": "~/.pi/agent/blackboard",
-    "debugLog": false
-  }
-}
-```
-
-| Key | Default | Notes |
+| key | default | meaning |
 |---|---|---|
-| `enabled` | `true` | master switch; `false` also *de-activates* the tool (pi auto-activates extension tools) |
-| `checkpointTurns` | `1` | review cadence in user turns. Extraction and `[RESOLVED]` marking still run every turn. Raise to 3–10 if the review cadence feels heavy |
-| `delivery` | `"next-turn"` | `"next-turn"`: the draft rides your next message (zero extra LLM calls). `"immediate"`: a steer message triggers a review turn now — useful for unattended runs where the next user message is far away |
-| `compaction` | `"off"` | `"board"` is what this package is for — see [Enable board mode](#enable-board-mode) |
-| `compactionWarnTokens` | `32768` | near-compaction zone in tokens left; inside it the checkpoint fires every turn with a countdown. `0` disables |
-| `maxEntriesPerSection` | `40` | per-section budget before rotation |
-| `maxEntryChars` | `300` | per-entry cap (adopted foreign summaries get 600 — a hard cut mid-rationale loses the part that matters) |
-| `maxDraftLines` | `60` | draft size rendered into a checkpoint message |
-| `draftOnCommit` | `"deterministic"` | which draft lines land with a commit without being retyped: `"none"` / `"deterministic"` (`MODIFIED`+`COMMIT` only) / `"all"` (agent culls with `dropDraft`) |
-| `commitContextEntries` | `2` | how many older entries per section a commit echoes back next to the new ones. `0` = only the new ones |
-| `summaryMaxChars` | `6000` | hard cap for the board rendered as the summary (footer reserved first) |
-| `compactAssist` / `compactAssistMaxChars` | `true` / `4000` | legacy assist path (see below) |
-| `seedFromPriorSummary` | `true` | merge native summaries into the board |
-| `mirrorToSession` | `true` | append the compact digest to the session JSONL |
-| `boardDir` | `<agent dir>/blackboard` | absolute, or relative to the pi agent dir |
-| `debugLog` | `false` | ndjson event log — the fastest way to see which hooks actually fired |
+| `enabled` | `true` | `false` also removes both tools from the model's tool set and stops injection |
+| `compaction` | `"off"` | `off` / `board` / `digest` (migration only) |
+| `checkpointTurns` | `1` | reminder cadence in turns |
+| `summaryMaxChars` | `6000` | exact character cap for the rendered summary |
+| `compactAssist` | `false` | opt-in native summary + notes (manual custom instructions) |
+| `compactAssistMaxChars` | `4000` | cap for the appended notes block |
+| `compactionWarnTokens` | `32768` | near-threshold zone; `0` disables |
+| `draftOnCommit` | `"deterministic"` | which mechanical draft lines land with a commit |
+| `debugLog` | `false` | record reasons/counts in `sbb-debug` entries (never raw content) |
+| `boardDir` | `<agentDir>/blackboard` | where locks, backups and the projection cache live |
 
-### Legacy: compaction assist
-
-`compactAssist` (on by default, irrelevant once `compaction: "board"`) calls the
-*same* exported `compact()` the harness would call — same model, prompt,
-retained tail — and appends a capped deterministic board section (goal ≤ 3, open
-issues ≤ 5, files ≤ 5, next ≤ 3, per-section stats, pointers to the board file
-and archive directory). Every failure path returns `undefined`, so the native
-flow runs untouched with its own retry policy.
+Obsolete keys (`mirrorToSession`, `seedFromPriorSummary`) are reported once per
+session instead of silently doing nothing.
 
 ## Cost model
 
-| Workload | This extension |
-|---|---|
-| background LLM calls | **never** |
-| extra prefill | none (extraction is pure CPU) |
-| prompt overhead | the checkpoint message (~1–3k tokens, appended at the end, so the prefix cache survives) + the small commit receipt; the auto-accepted draft lines cost **no** agent output tokens |
-| archival | deterministic file rotation |
-| compaction | `"board"`: render the board, skip pi's summarization call (thin board → native). `"off"`/`"digest"`: native, optionally with an appended section / mirrored digest |
+- Normal turns: **zero** model calls from this extension; the reminder rides an
+  existing request.
+- Compaction with coverage: **zero** summarizer calls, no extra requests.
+- Compaction without coverage: at most **2** extra memory-only requests, then
+  native. Each is bounded to memory tools and ends the turn.
+- `compactAssist` on, or manual compaction with custom instructions: **one**
+  summarizer call (that is what "assist" means).
+- Retrieval, export, review: local only.
 
-## Compatibility
-
-- pi ≥ 0.84 (developed against the 0.84.x extension API: `agent_settled`,
-  `before_agent_start`, `session_before_compact`, `session_compact`,
-  `session_start`, `pi.registerTool`, `pi.registerCommand`, `pi.appendEntry`,
-  `pi.sendMessage`).
-- **Zero runtime dependencies** — only `node:*`, `typebox` and
-  `@earendil-works/pi-coding-agent`, all resolved by pi's extension loader.
-- **Node ≥ 22.** pi's own package imports `globSync` from `node:fs` (added in
-  Node 22), so the test suite cannot even load its dependency on Node 20, and CI
-  runs 22.x and 24.x; `engines.node` says `>=22`.
-- TypeScript strict; `npm install && npm run typecheck`.
-
-## Development
+## Tests
 
 ```bash
-npm install          # devDependencies only; the extension itself has none
-npm run typecheck    # tsc --noEmit
-npm test             # build (tsc → build/) + node test/smoke.mjs   (54 checks)
-npm run docs:render  # SVG → PNG via resvg (deterministic, no browser)
+npm run typecheck
+npm test            # smoke + reliability + journal + import + runtime + faults + platform + real-SDK
+npm run test:known  # previously-failing reproductions, kept as regression guards
 ```
 
-The smoke suite asserts the pure functions that decide what the model sees
-after a compaction: board → summary rendering, recall search, commit +
-supersedes + rotation + pointer caps, adoption parsing, the countdown math, the
-legacy assist section. Hooks, checkpoint injection and the compaction handover
-are exercised in real pi sessions, not in the suite.
-
-Diagram sources are `docs/src/*.svg` (`-en` / `-zh` pairs); the committed PNGs
-in `docs/images/` are what GitHub renders.
-
-> **A `&` in the repo path breaks npm scripts on Windows.** npm resolves the
-> `node_modules\.bin` shims to an absolute path containing `&`, cmd.exe treats
-> it as a command separator, and you get `'D:\…\node_modules\.bin\' is not
-> recognized`. That is why `build`/`typecheck` call
-> `node ./node_modules/typescript/bin/tsc` instead of bare `tsc`.
-
-`tsconfig.json` is the portable config. `tsconfig.check.json` /
-`tsconfig.build.json` are local helpers (they map `@earendil-works/*` and
-`typebox` to whatever is installed on this machine) and are git-ignored on
-purpose.
+The real-SDK tests load the shipped `src/index.ts` into pi 1.3.0 with an
+in-process fixed model stream. `fetch` throws in those tests and is asserted never
+called. CI runs Linux and Windows on Node 22.19.0 and 24.
 
 ## Known limitations
 
-- **Board mode trades summary quality for cost and determinism.** An LLM summary
-  re-narrates the conversation; the board renders the committed lines. What you
-  give up is the narrative: tone, hedging, half-formed reasoning, and anything
-  that was never written down. Nothing is deleted: pi's retained tail stays
-  verbatim, superseded and rotated lines stay on disk, and `blackboard_recall` /
-  `/bb show` let the agent read them again. If you would rather pay the model
-  call, `compaction: "off"` (the default) keeps pi's native summary.
-- **Curation is prompt-enforced, not guaranteed.** The model can ignore a
-  checkpoint. Mitigations: at most 3 re-injections plus a visible warning, and a
-  fresh trigger on the next user turn. Near-compaction nudges do not consume
-  that budget.
-- **Assistant-text mining (decisions/next/findings) is deliberately light and
-  capped.** Treat it as a starting point for the review pass.
-- **Auto-accepted `Files` lines are not reviewed.** They come from tool arguments
-  (which file, which exported symbol, which commit hash), so they are exact, but
-  not always relevant: a session that touches 30 files produces 30 lines. Set
-  `draftOnCommit: "none"` if you want every line to pass through the agent.
-- **The `[ERROR]` extractor is a heuristic over raw tool output** and does
-  produce false positives. Observed: an `[ERROR]` line echoed inside test
-  output, and a `grep -c` with zero matches (exit code 1) on a run that actually
-  passed. The review step is the mitigation; extraction will keep making
-  mistakes like these.
-- **`[Scope change]` detection needs explicit pivot language.** Tightened after
-  measuring that a task-verb rule fired on 4 of 5 ordinary follow-up messages;
-  the cost is that a quiet change of direction is only caught by the agent.
-- **Per-session boards.** A finished session's board is a file you can keep,
-  grep or delete; `/bb reset` only touches the current session.
-- **No cross-session recall.** `blackboard_recall` covers this session's live
-  board, its archive and its mirrored digests. For anything older, grep the
-  `blackboard/` directory yourself.
-- **`blackboard_recall` reads at most the 40 newest archive files** and says so
-  when it capped. Very long sessions should grep the archive directory instead.
-- **The summary is only as good as the board.** A session that never commits
-  gets a thin board, and a thin board deliberately falls back to pi's native
-  summarization rather than produce a useless summary.
+- A deterministic render cannot narrate. Tone, hedging and half-formed reasoning
+  that were never written down do not survive; the retained tail is verbatim, the
+  rest is whatever the notes contain.
+- Coverage is *structural*: it proves that a source range was reviewed at a
+  content fingerprint, not that the notes are semantically correct.
+- Notes too long for the summary budget must be rewritten by the model; a very
+  long protected note therefore blocks takeover until it is shortened or its
+  retention expires.
+- Manual compaction with gaps falls back to native in this version: there is no
+  safe way to hand a repair turn back to a user-initiated compaction.
+- Cross-process merging is not attempted; a second writer is refused.
+- Legacy archives are searchable but stay unscoped forever; nothing infers their
+  branch.
 
-## Acknowledgements & license
+## License
 
-Goal/scope-change and preference patterns are adapted from
-**[@monotykamary/pi-vcc](https://github.com/monotykamary/pi-vcc)** (MIT). The
-"deterministic extraction + agent-curated commits + board-as-summary" design is
-this package's.
-
-MIT — see [LICENSE](./LICENSE). Changes: [CHANGELOG.md](CHANGELOG.md).
+MIT.
