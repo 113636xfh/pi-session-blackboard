@@ -1,7 +1,7 @@
 /** Real pi 1.3 session/extension runtime; the only model is an in-process fixed stream. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
@@ -173,4 +173,70 @@ test('pi 1.3: getEntries includes abandoned paths; projected source can change w
   const projected = manager.buildSessionProjection().entries.find(entry => entry.sourceEntry.id === root);
   assert.equal(projected.messages[0].content, 'Changed synthetic constraint');
   assert.equal(projected.sourceEntry.id, root);
+});
+
+test('real SDK: the shipped extension registers, runs and persists through a fixed model', { timeout: 30000 }, async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'sbb-int-'));
+  let session;
+  t.after(() => { session?.dispose(); rmSync(dir, { recursive: true, force: true }); });
+  const fetchMock = t.mock.method(globalThis, 'fetch', () => { throw new Error('NETWORK FORBIDDEN'); });
+  mkdirSync(join(dir, '.pi'));
+  writeFileSync(join(dir, '.pi/settings.json'), JSON.stringify({ 'session-blackboard': { boardDir: join(dir, 'boards'), compaction: 'board', debugLog: true } }));
+  const manager = SessionManager.create(dir, join(dir, 'sessions'));
+  const settings = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, allowModelNetwork: false, refreshOnCreate: false });
+  const prompts = [];
+  runtime.registerProvider('sbb-offline', {
+    api: 'openai-completions', baseUrl: 'http://127.0.0.1:1/unused', apiKey: 'synthetic',
+    models: [{ id: 'fixed', name: 'Fixed', input: ['text'], reasoning: false, contextWindow: 64000, maxTokens: 1024, cost: ZERO_COST }],
+    streamSimple(model, context) {
+      prompts.push(context.messages.map(message => ({ role: message.role, text: textOf(message) })));
+      const index = prompts.length - 1;
+      const stream = createAssistantMessageEventStream();
+      const message = { role: 'assistant', api: model.api, provider: model.provider, model: model.id,
+        content: index === 0
+          ? [{ type: 'toolCall', id: 'call-blackboard', name: 'blackboard', arguments: {
+              action: 'commit', entries: [{ section: 'goal', text: 'Ship the integration fixture' }, { section: 'next', text: 'Verify persistence', taskState: 'todo' }] } }]
+          : [{ type: 'text', text: 'Fixture complete.' }],
+        stopReason: index === 0 ? 'toolUse' : 'stop', timestamp: 1700000000000 + index,
+        usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: ZERO_COST } };
+      queueMicrotask(() => { stream.push({ type: 'start', partial: message }); stream.push({ type: 'done', reason: message.stopReason, message }); });
+      return stream;
+    },
+  });
+  const loader = new DefaultResourceLoader({
+    cwd: dir, agentDir: join(dir, 'agent'), settingsManager: settings,
+    noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true,
+    systemPrompt: 'Offline fixture. Use the blackboard tool once.',
+    additionalExtensionPaths: [join(process.cwd(), 'src', 'index.ts')],
+  });
+  await loader.reload();
+  assert.deepEqual(loader.getExtensions().errors, []);
+  const created = await createAgentSession({ cwd: dir, agentDir: join(dir, 'agent'), modelRuntime: runtime,
+    model: runtime.getModel('sbb-offline', 'fixed'), thinkingLevel: 'off', sessionManager: manager,
+    settingsManager: settings, resourceLoader: loader });
+  session = created.session;
+  const errors = [];
+  await session.bindExtensions({ mode: 'print', onError: error => errors.push(error) });
+  await session.prompt('Record the fixture goal.');
+  assert.deepEqual(errors, []);
+  const toolResult = manager.getBranch().find(entry => entry.type === 'message' && entry.message?.role === 'toolResult');
+  assert.equal(toolResult.message.toolName, 'blackboard');
+  assert.match(textOf(toolResult.message), /Committed/);
+  const events = manager.getBranch().filter(entry => entry.type === 'custom' && entry.customType === 'sbb-event');
+  assert(events.length >= 1, 'the commit is an authoritative session event');
+  const projection = replayBranch(manager.getBranch());
+  assert(Object.values(projection.entries).some(entry => entry.section === 'goal' && entry.text === 'Ship the integration fixture'));
+  assert(Object.values(projection.entries).some(entry => entry.taskState === 'todo'));
+  assert.equal(prompts.length, 2);
+  // Reopen the persisted session: the notes must come from events, not from a Markdown file.
+  const reopened = SessionManager.open(manager.getSessionFile());
+  const tools = {};
+  extension({ on: () => () => {}, registerTool: tool => { tools[tool.name] = tool; }, registerCommand: () => {},
+    getActiveTools: () => [], setActiveTools: () => {}, appendEntry: () => {} });
+  const shown = await tools.blackboard.execute('s1', { action: 'show' }, undefined, undefined,
+    { cwd: dir, sessionManager: reopened, ui: { notify: () => {} } });
+  assert(shown.content[0].text.includes('Ship the integration fixture'));
+  assert.equal(existsSync(join(dir, 'boards', 'fault.md')) || existsSync(join(dir, 'boards', `${reopened.getSessionId()}.md`)), false, 'no Markdown board is written');
+  assert.equal(fetchMock.mock.callCount(), 0);
 });
