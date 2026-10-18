@@ -18,6 +18,14 @@ import { commitWithCache, WriterLocks } from './storage.js';
 import { makeOffer, validateReview, validateSources, draftCandidates, sourceRefs, checkReadiness, repairHeadroom } from './coverage.js';
 import { SECTIONS, type BranchEntry, type JournalChange, type JournalProjection, type PendingDraft } from './types.js';
 
+export const SUMMARY_GENERATOR = 'pi-session-blackboard';
+export const SUMMARY_SCHEMA = 2;
+/** Ownership is a generator+schema claim, never pi's generic `fromExtension` flag. */
+export const isOwnSummary = (details: unknown): details is { generator: string; schema: number } => {
+  const d = details as { generator?: unknown; schema?: unknown } | undefined;
+  return d?.generator === SUMMARY_GENERATOR && d?.schema === SUMMARY_SCHEMA;
+};
+
 type Ctx = any;
 const OWN_TOOLS = ['blackboard', 'blackboard_recall'];
 export default function sessionBlackboard(pi: ExtensionAPI) {
@@ -381,7 +389,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
         summary: honoured ?? summary,
         firstKeptEntryId: cut ?? s.branch.at(-1)?.id ?? '',
         tokensBefore: event.preparation?.tokensBefore ?? 0,
-        details: { generator: 'pi-session-blackboard', schema: 2, revision: s.projection.revision, generation: s.projection.generation, ...(honoured ? { assisted: true } : {}) },
+        details: { generator: SUMMARY_GENERATOR, schema: SUMMARY_SCHEMA, source: 'session-events', revision: s.projection.revision, generation: s.projection.generation, ...(honoured ? { assisted: true, note: 'native text honours manual instructions; blackboard section appended' } : {}) },
       } };
     }
     const allowance = s.projection.repair?.extraRequests ?? 0;
@@ -411,12 +419,20 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
   pi.on('session_compact', async (event, ctx) => {
     const s = get(ctx);
     if (!s.cfg.enabled) return;
+    const entry = event?.compactionEntry as { id?: string; summary?: string; details?: unknown; fromHook?: boolean } | undefined;
+    const ours = isOwnSummary(entry?.details);
     const changes: JournalChange[] = [];
     if (s.projection.native) changes.push({ type: 'native' });
     if (s.projection.repair) changes.push({ type: 'repair', repair: { ...s.projection.repair, phase: 'checked' } });
     if (changes.length) change(ctx, changes);
-    const details = event?.compactionEntry?.details as { generator?: string } | undefined;
-    logAttempt('success', { reason: event?.reason, fromUs: details?.generator === 'pi-session-blackboard', generation: replayBranch(s.manager.getBranch()).generation });
+    if (entry?.summary && !ours) {
+      // Some other producer (pi itself, assist, another extension) wrote this summary. It is the
+      // only record of the replaced messages, so it must be reviewed and imported, never skipped
+      // just because `fromExtension` happens to be true.
+      logAttempt('foreign-summary', { compactionId: entry.id, fromHook: entry.fromHook === true, fingerprint: fingerprint(entry.summary) });
+      notify(ctx, 'A summary not produced by this blackboard is pending review and import; run /bb review before the next compaction relies on it.', 'warning');
+    }
+    logAttempt('success', { reason: event?.reason, fromUs: ours, generation: replayBranch(s.manager.getBranch()).generation });
   });
   pi.registerCommand('bb', {
     description: 'Session notes: show | commit <JSON> | skip | archive <ID> | reset. Markdown is export-only.',

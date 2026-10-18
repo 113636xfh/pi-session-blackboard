@@ -338,6 +338,26 @@ test('pressure numbers are transient: never stored, never summarised, never rein
   assert(!(unmeasured?.message?.content ?? '').includes('context pressure'), 'without a measurement no number is shown');
 });
 
+test('summary ownership is an explicit generator claim, not fromExtension', async t => {
+  const h = harness(t);
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Review only' }, { section: 'next', text: 'Inspect', taskState: 'todo' }] });
+  const offer = (await h.invoke({ action: 'review' })).details.credential;
+  await h.invoke({ action: 'commit', review: { id: offer.id, constraintsChecked: true, executionChecked: true, goalChecked: true } }, 'covered');
+  const made = (await h.hooks.session_before_compact({ reason: 'threshold', preparation: { firstKeptEntryId: null, tokensBefore: 1 } }, h.ctx)).compaction;
+  assert.equal(made.details.generator, 'pi-session-blackboard');
+  assert.equal(made.details.schema, 2);
+  assert.equal(made.details.source, 'session-events');
+  // Another extension's summary with fromHook=true must still be treated as foreign.
+  await h.hooks.session_compact({ reason: 'threshold', compactionEntry: { id: 'foreign-1', summary: 'Someone else wrote this', fromHook: true, details: { generator: 'other-extension', schema: 9 } } }, h.ctx);
+  assert(h.notices.at(-1)[0].includes('pending review and import'));
+  const logged = h.branch.filter(entry => entry.customType === 'sbb-compaction').map(entry => entry.data);
+  assert(logged.some(item => item.kind === 'foreign-summary' && item.compactionId === 'foreign-1'));
+  assert(logged.some(item => item.kind === 'success' && item.fromUs === false));
+  const before = h.notices.length;
+  await h.hooks.session_compact({ reason: 'threshold', compactionEntry: { id: 'own-1', summary: made.summary, details: made.details } }, h.ctx);
+  assert(h.notices.length === before, 'our own summary produces no import warning');
+});
+
 test('cooperating writers cannot share a session lock, and release does not delete another owner', t => {
   const h = harness(t), a = new WriterLocks(), b = new WriterLocks();
   t.after(() => { a.release(); b.release(); });
