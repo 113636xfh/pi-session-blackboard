@@ -273,6 +273,71 @@ test('cancelling the owed repair stops further asks instead of silently continui
   assert.equal(await h.hooks.session_before_compact({ reason: 'threshold', preparation: { firstKeptEntryId: null, tokensBefore: 40000 } }, h.ctx), undefined);
 });
 
+test('compaction outcomes: a cancelled attempt never advances the generation, success advances once and clears one-shots', async t => {
+  const h = harness(t); h.ctx.getContextUsage = () => ({ tokens: 20000, contextWindow: 64000 });
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Review only', retain: true }, { section: 'next', text: 'Inspect', taskState: 'todo', retain: true }] });
+  await h.commands.bb.handler('native', h.ctx);
+  const before = h.projection();
+  assert(before.native && Object.values(before.entries).some(entry => entry.retention));
+  // Deferral (cancel) is not success: nothing advances and the request stays owed.
+  await h.hooks.session_before_compact({ reason: 'threshold', preparation: { firstKeptEntryId: null, tokensBefore: 40000 } }, h.ctx);
+  assert.equal(h.projection().generation, before.generation);
+  assert.equal(Object.values(h.projection().entries).filter(entry => entry.retention).length, 2);
+  // A real compaction node is the only success signal: it advances and consumes retention once.
+  h.branch.push({ id: `c-${h.branch.length}`, parentId: h.branch.at(-1)?.id ?? null, type: 'compaction', summary: 'native summary', firstKeptEntryId: null, tokensBefore: 1 });
+  assert.equal(h.projection().generation, before.generation + 1);
+  assert.equal(Object.values(h.projection().entries).filter(entry => entry.retention).length, 0);
+  await h.hooks.session_compact({ reason: 'threshold', compactionEntry: { details: { generator: 'pi-session-blackboard' } } }, h.ctx);
+  assert.equal(h.projection().native, undefined, 'one-shot native is cleared on success');
+  const attempts = h.branch.filter(entry => entry.customType === 'sbb-compaction').map(entry => entry.data.kind);
+  assert(attempts.includes('native-requested') || attempts.includes('deferred') || attempts.includes('takeover'));
+  assert(attempts.includes('success'));
+});
+
+test('rebuilt context drops old-generation hints and reminds about expired retention exactly once', async t => {
+  const h = harness(t);
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Keep this constraint', retain: true }, { section: 'next', text: 'Do the work', taskState: 'todo' }] });
+  h.branch.push({ type: 'compaction', id: `c-${h.branch.length}`, summary: 'compacted', firstKeptEntryId: null, tokensBefore: 1, parentId: h.branch.at(-1)?.id ?? null });
+  const stale = { role: 'custom', customType: 'sbb-checkpoint', content: '[old] 1.2k left', display: false, details: { generation: 0 }, timestamp: 1 };
+  const user = { role: 'user', content: 'Original constraint text', timestamp: 2 };
+  const first = await h.hooks.context({ messages: [stale, user] }, h.ctx);
+  const kept = first.messages;
+  assert(!kept.some(message => message.customType === 'sbb-checkpoint'), 'stale checkpoint leaves the projection');
+  assert(kept.some(message => message.role === 'user' && message.content === 'Original constraint text'), 'user content is preserved');
+  const notice = kept.find(message => message.customType === 'sbb-retention-notice');
+  assert(notice && notice.content.includes('consumed'), 'expiry notice is present');
+  assert(!/[0-9]+\.[0-9]k/.test(notice.content), 'no stale countdown numbers are carried');
+  const second = await h.hooks.context({ messages: [stale, user] }, h.ctx);
+  const notices = (first.messages.length ? 1 : 0) + (second?.messages ?? []).filter(message => message.customType === 'sbb-retention-notice').length;
+  assert.equal(notices, 1, 'reminded once per generation, not on every request');
+  assert((second?.messages ?? []).some(message => message.role === 'user'));
+});
+
+test('pressure numbers are transient: never stored, never summarised, never reintroduced after resume', async t => {
+  const h = harness(t);
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Review only' }, { section: 'next', text: 'Inspect', taskState: 'todo' }] });
+  const offer = (await h.invoke({ action: 'review' })).details.credential;
+  await h.invoke({ action: 'commit', review: { id: offer.id, constraintsChecked: true, executionChecked: true, goalChecked: true } }, 'covered');
+  // No measurement -> no numbers at all.
+  const blind = (await h.hooks.before_agent_start({}, h.ctx))?.message?.content ?? '';
+  assert(!/[0-9]/.test(blind.split('\n').filter(line => line.includes('context pressure')).join('')));
+  h.ctx.getContextUsage = () => ({ tokens: 60000, contextWindow: 64000 });
+  const near = (await h.hooks.before_agent_start({}, h.ctx)).message.content;
+  assert(near.includes('context pressure') && /[0-9]/.test(near), 'fresh measurement is shown');
+  assert(!JSON.stringify(h.projection()).includes('context pressure'), 'numbers never enter the journal');
+  const summary = (await h.hooks.session_before_compact({ reason: 'threshold', preparation: { firstKeptEntryId: null, tokensBefore: 60000 } }, h.ctx)).compaction.summary;
+  assert(!summary.includes('context pressure') && !summary.includes('NEAR COMPACTION'));
+  // Fresh runtime, same branch: nothing to replay, so no stale countdown returns.
+  const hooks2 = {};
+  extension({ on: (name, fn) => { hooks2[name] = fn; }, registerTool: () => {}, registerCommand: () => {},
+    getActiveTools: () => [], setActiveTools: () => {}, appendEntry: (type, data) => h.branch.push({ id: `x-${h.branch.length}`, parentId: h.branch.at(-1)?.id ?? null, type: 'custom', customType: type, data }) });
+  const resumed = await hooks2.before_agent_start({}, h.ctx);
+  assert((resumed?.message?.content ?? '').includes('context pressure'), 'a fresh measurement may be recomputed');
+  h.ctx.getContextUsage = undefined;
+  const unmeasured = await hooks2.before_agent_start({}, h.ctx);
+  assert(!(unmeasured?.message?.content ?? '').includes('context pressure'), 'without a measurement no number is shown');
+});
+
 test('cooperating writers cannot share a session lock, and release does not delete another owner', t => {
   const h = harness(t), a = new WriterLocks(), b = new WriterLocks();
   t.after(() => { a.release(); b.release(); });

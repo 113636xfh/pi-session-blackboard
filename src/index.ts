@@ -4,7 +4,7 @@ import { compact } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { loadConfig, computePressure } from './config.js';
+import { loadConfig, computePressure, describePressure } from './config.js';
 import { normalizeBranch, extractAll } from './extract.js';
 import { defaultState } from './state.js';
 import { selectDraftLines, hasSummaryContext } from './board.js';
@@ -210,19 +210,53 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
   };
   const reminder = (ctx: Ctx) => {
     const s = get(ctx); if (!s.cfg.enabled) return;
-    const near = pressure(ctx)?.near === true;
-    if (near || (s.projection.draft && s.projection.turns % s.cfg.checkpointTurns === 0)) return {
-      message: { customType: 'sbb-review-needed', content: `[session-blackboard checkpoint]\n${near ? 'NEAR COMPACTION: pause task expansion and write important changes now.' : 'Review pending session notes on this existing request.'}\nCall blackboard action=review to inspect the complete candidates and receive a content-bound credential; commit useful notes and explicitly confirm the reviewed range. skip only discards the draft and does not confirm coverage. Notes need goals, constraints (or explicit none-new), execution state, decisions and uncertainties.`, display: false },
-    };
+    const p = pressure(ctx), near = p?.near === true;
+    const due = near || (s.projection.draft && s.projection.turns % s.cfg.checkpointTurns === 0);
+    // The countdown is a transient block computed from this turn's measurement only. It is never
+    // stored as a note, never copied into a summary, and disappears with its compaction generation.
+    const lines = typeof p?.remaining === 'number' && p.remaining !== null && ctx.getContextUsage?.()
+      ? [describePressure(p)!] : [];
+    if (!due && !lines.length) return;
+    if (due) lines.push(
+      '[session-blackboard checkpoint]',
+      near ? 'NEAR COMPACTION: pause task expansion and write important changes now.' : 'Review pending session notes on this existing request.',
+      'Call blackboard action=review to inspect the complete candidates and receive a content-bound credential; commit useful notes and explicitly confirm the reviewed range. skip only discards the draft and does not confirm coverage. Notes need goals, constraints (or explicit none-new), execution state, decisions and uncertainties.');
+    return { message: { customType: 'sbb-review-needed', display: false, details: { generation: s.projection.generation }, content: lines.join('\n') } };
   };
   pi.on('session_start', async (_event, ctx) => { syncTools(ctx); });
   pi.on('turn_end', async (event, ctx) => { collectTurn(event, ctx); });
   pi.on('before_agent_start', async (_event, ctx) => { syncTools(ctx); return reminder(ctx); });
-  pi.on('context', async (_event, ctx) => {
+  const noticesShown = new Set<string>();
+  const OWN_MESSAGE_PREFIX = 'sbb-';
+  const generationOf = (message: any): number | undefined => {
+    const value = message?.details?.generation;
+    return typeof value === 'number' ? value : undefined;
+  };
+  pi.on('context', async (event, ctx) => {
     const s = get(ctx), repair = s.projection.repair;
-    if (!s.cfg.enabled || !repair) return;
+    if (!s.cfg.enabled) return;
     // Only a request that actually reaches the provider proves the repair message was delivered.
-    if (repair.phase === 'queued') change(ctx, [{ type: 'repair', repair: { ...repair, phase: 'delivered' } }]);
+    if (repair?.phase === 'queued') change(ctx, [{ type: 'repair', repair: { ...repair, phase: 'delivered' } }]);
+    const generation = s.projection.generation;
+    const before = Array.isArray(event.messages) ? event.messages : [];
+    // Old-generation extension hints are removed from the model-visible projection only; the
+    // session log, user content and pending drafts are untouched.
+    const messages = before.filter((message: any) => {
+      if (message?.role !== 'custom' || typeof message.customType !== 'string' || !message.customType.startsWith(OWN_MESSAGE_PREFIX)) return true;
+      const tagged = generationOf(message);
+      return tagged === undefined ? generation === 0 : tagged === generation;
+    });
+    let changed = messages.length !== before.length;
+    const key = `${s.sessionId}:${generation}`;
+    if (s.projection.expiredIds.length && !noticesShown.has(key)) {
+      noticesShown.add(key);
+      const ids = s.projection.expiredIds.slice(0, 20).join(', ');
+      messages.push({ role: 'custom', customType: 'sbb-retention-notice', display: false,
+        content: `[session-blackboard] The previous successful compaction consumed these retention grants: ${ids}. Re-promote an entry explicitly (blackboard action=retain with expectedRevision) only if it must be protected next time; handled items need no action. Validity, constraints and task state are unchanged.`,
+        timestamp: Date.now() });
+      changed = true;
+    }
+    if (changed) return { messages };
   });
   pi.on('tool_call', async (event, ctx) => {
     if (dedicatedRepair(ctx) && !OWN_TOOLS.includes(event.toolName)) return { block: true, terminate: true, reason: 'Dedicated memory repair: pause task expansion; only blackboard tools are allowed for this bounded request.' };
@@ -286,9 +320,12 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     if (!pending) markNeeded(ctx);
     const content = takeAndSend(ctx);
     if (!content) return;
-    return { entries: [{ type: 'custom_message', customType: 'sbb-urgent-write', content, display: false }], continue: true };
+    return { entries: [{ type: 'custom_message', customType: 'sbb-urgent-write', content, display: false, details: { generation: s.projection.generation } }], continue: true };
   });
   pi.on('session_shutdown', async () => { locks.release(); });
+  const logAttempt = (kind: string, data: Record<string, unknown>) => {
+    try { pi.appendEntry('sbb-compaction', { kind, at: new Date().toISOString(), ...data }); } catch { /* diagnostics only */ }
+  };
   const summaryFor = (s: ReturnType<typeof get>, maxChars = s.cfg.summaryMaxChars) => {
     const board = toBoard(s.projection);
     return renderSummary(board, {
@@ -320,6 +357,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     if (s.projection.native) {
       if (nativeRequestFresh(s.projection)) {
         change(ctx, [{ type: 'native' }]);
+        logAttempt('native-requested', { reason: event.reason });
         notify(ctx, 'Native compaction requested; blackboard does not take over this one.', 'info');
         return;
       }
@@ -338,6 +376,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     if (!problems.length && summary) {
       const honoured = event.reason === 'manual' && typeof event.customInstructions === 'string' && event.customInstructions.trim()
         ? await assistedSummary(ctx, event, s) : null;
+      logAttempt('takeover', { reason: event.reason, assisted: !!honoured, revision: s.projection.revision, generation: s.projection.generation, chars: (honoured ?? summary).length });
       return { compaction: {
         summary: honoured ?? summary,
         firstKeptEntryId: cut ?? s.branch.at(-1)?.id ?? '',
@@ -352,6 +391,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
       // Never start the model from inside the hook: mark the repair pending and let the
       // run's own before-settle boundary deliver it.
       if (s.projection.repair?.phase !== 'needed') markNeeded(ctx, range);
+      logAttempt('deferred', { reason: event.reason, problems: problems.length, allowance: allowance + 1, generation: s.projection.generation });
       notify(ctx, 'Compaction deferred for a bounded memory repair; the current turn will finish it.', 'info');
       return { cancel: true };
     }
@@ -363,7 +403,20 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
           ? 'both bounded repair requests were spent'
           : 'no safe headroom for a repair turn';
     notify(ctx, `Native summary used (${event.reason}): ${why}. Still unresolved: ${problems.join('; ')}`, 'warning');
+    logAttempt('native-fallback', { reason: event.reason, why, problems: problems.length });
     return;
+  });
+  // A persisted compaction node is the only proof of success: it advances the generation and
+  // consumes retention on replay. This handler only clears one-shot/ephemeral requests.
+  pi.on('session_compact', async (event, ctx) => {
+    const s = get(ctx);
+    if (!s.cfg.enabled) return;
+    const changes: JournalChange[] = [];
+    if (s.projection.native) changes.push({ type: 'native' });
+    if (s.projection.repair) changes.push({ type: 'repair', repair: { ...s.projection.repair, phase: 'checked' } });
+    if (changes.length) change(ctx, changes);
+    const details = event?.compactionEntry?.details as { generator?: string } | undefined;
+    logAttempt('success', { reason: event?.reason, fromUs: details?.generator === 'pi-session-blackboard', generation: replayBranch(s.manager.getBranch()).generation });
   });
   pi.registerCommand('bb', {
     description: 'Session notes: show | commit <JSON> | skip | archive <ID> | reset. Markdown is export-only.',
