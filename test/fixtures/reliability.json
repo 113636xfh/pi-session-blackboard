@@ -1,0 +1,19 @@
+{
+  "description": "Synthetic public fixtures. No local user session content or private paths.",
+  "fileCases": [
+    { "name": "success", "result": { "isError": false }, "expected": "ok" },
+    { "name": "error", "result": { "isError": true }, "expected": "error" },
+    { "name": "unknown", "result": {}, "expected": "unknown" },
+    { "name": "cancelled", "result": { "isError": false, "details": { "cancelled": true } }, "expected": "cancelled" },
+    { "name": "unfinished", "result": { "isError": false, "details": { "status": "unfinished" } }, "expected": "unfinished" },
+    { "name": "exit-code", "result": { "isError": false, "details": { "exitCode": 1 } }, "expected": "error" }
+  ],
+  "candidateBatchSize": 20,
+  "archiveCount": 55,
+  "summaryEntries": [
+    { "section": "next", "ts": "2026-01-01T10:00:00.000Z", "order": 1, "text": "OLDEST_NEXT continue the synthetic task; not yet verified" },
+    { "section": "files", "ts": "2026-01-01T11:00:00.000Z", "order": 2, "text": "MIDDLE_FILE MODIFIED src/sample.ts" },
+    { "section": "goal", "ts": "2026-01-01T12:00:00.000Z", "order": 3, "text": "NEWEST_GOAL review only; do not change application code" }
+  ],
+  "nativeSummary": "## Goal\n- Review a synthetic project\n## Progress\n### Done\n- Inspected the parser\n### In Progress\n- Checking the renderer; not yet verified\n### Blocked\n- Awaiting user approval\n## Next Steps\n1. Check parser boundaries\n## Critical Context\n- Hypothesis only: a cache may be stale; NOT proven\n<read-files>\nsrc/sample.ts\n</read-files>"
+}
