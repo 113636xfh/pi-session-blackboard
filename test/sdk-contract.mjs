@@ -10,6 +10,7 @@ import {
   createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
 } from '@earendil-works/pi-coding-agent';
 
+import { replayBranch, planCommit, appendTransaction, newEvent } from '../build/journal.js';
 const PROBE_TYPE = 'sbb-sdk-contract';
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 const textOf = message => typeof message.content === 'string' ? message.content
@@ -108,6 +109,33 @@ test('pi 1.3: append confirmation, real entry IDs and actionable boundaries', { 
   assert.equal(fetch.mock.callCount(), 0);
   const reopened = SessionManager.open(manager.getSessionFile());
   assert.deepEqual(reopened.getBranch().filter(entry => entry.type === 'custom').map(entry => entry.data), events.map(entry => entry.data));
+});
+
+test('event projections isolate real SDK tree, fork, branch clone and reset', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'sbb-tree-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const manager = SessionManager.create(dir, join(dir, 'sessions'));
+  manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'Synthetic root' }], timestamp: 1700000000000 });
+  const adapter = m => ({ appendEntry: (type, data) => { m.appendCustomEntry(type, data); } });
+  const write = (m, entries, operation) => appendTransaction(adapter(m), m, planCommit(replayBranch(m.getBranch()), entries, operation));
+  write(manager, [{ section: 'goal', text: 'Shared ancestor' }], 'common');
+  const ancestor = manager.getLeafId();
+  write(manager, [{ section: 'next', text: 'A_ONLY' }], 'branch-a');
+  const leafA = manager.getLeafId();
+  manager.branch(ancestor);
+  write(manager, [{ section: 'next', text: 'B_ONLY' }], 'branch-b');
+  const text = m => Object.values(replayBranch(m.getBranch()).entries).filter(entry => entry.validity === 'active').map(entry => entry.text);
+  assert.deepEqual(text(manager), ['Shared ancestor', 'B_ONLY']);
+  const originalFile = manager.getSessionFile();
+  const cloneFile = manager.createBranchedSession(leafA);
+  const clone = SessionManager.open(cloneFile);
+  assert.deepEqual(text(clone), ['Shared ancestor', 'A_ONLY']);
+  const original = SessionManager.open(originalFile);
+  const fork = SessionManager.forkFrom(originalFile, dir, join(dir, 'forks'));
+  assert.deepEqual(text(fork), ['Shared ancestor', 'B_ONLY']);
+  appendTransaction(adapter(fork), fork, newEvent(replayBranch(fork.getBranch()), [{ type: 'reset' }], 'fork-reset'));
+  assert.deepEqual(text(fork), []); assert.deepEqual(text(original), ['Shared ancestor', 'B_ONLY']);
+  manager.branch(leafA); assert.deepEqual(text(manager), ['Shared ancestor', 'A_ONLY']);
 });
 
 test('pi 1.3: getEntries includes abandoned paths; projected source can change without changing its ID', () => {

@@ -26,8 +26,8 @@ export const SECTION_HEADERS: Record<Section, string> = {
 	archived: "Archived",
 };
 
-/** One board entry (a single line in the markdown file). */
-export type BoardEntry = { ts: string; text: string; /** Stable event order when available (legacy boards may lack it). */ order?: number };
+/** Renderable entry; v2 metadata is preserved when projecting the event journal. */
+export type BoardEntry = { ts: string; text: string; order?: number } & Partial<MemoryEntry>;
 
 /**
  * Parsed blackboard. `extra` preserves unknown `## ...` sections verbatim so
@@ -36,6 +36,8 @@ export type BoardEntry = { ts: string; text: string; /** Stable event order when
  */
 export type Board = {
 	header: { updated?: string; entries?: number };
+	generation?: number;
+	revision?: number;
 	sections: Record<Section, BoardEntry[]>;
 	raw: Record<Section, string[]>;
 	extra: { title: string; lines: string[] }[];
@@ -118,6 +120,47 @@ export type NormalizedBlocks = {
 	users: UserBlock[];
 	assistants: AssistantBlock[];
 	tools: ToolBlock[];
+};
+
+export type TaskState = "todo" | "in_progress" | "blocked" | "done" | "cancelled";
+export type Origin = "user" | "tool" | "assistant" | "native-summary" | "legacy";
+export type SourceRef = { entryId: string; fingerprint: string; kind: Origin; callId?: string };
+export type MemoryEntry = {
+	id: string; revision: number; section: Exclude<Section, "archived">; text: string;
+	createdAt: string; updatedAt: string; order: number;
+	validity: "active" | "superseded" | "retracted";
+	taskState?: TaskState; epistemic: "stated" | "hypothesis" | "unknown";
+	origin: Origin; sources: SourceRef[]; archived: boolean;
+	retention?: { grantId: string; generation: number };
+	verification?: string; legacyUnscoped?: boolean;
+};
+export type ReviewReceipt = {
+	id: string; leafId: string; range: SourceRef[]; candidateIds: string[];
+	constraintsChecked: boolean; executionChecked: boolean; goalChecked: boolean;
+};
+export type RepairState = {
+	generation: number; extraRequests: number;
+	phase: "needed" | "queued" | "delivered" | "checked" | "exhausted";
+	rangeFingerprint: string; requestId: string; instructions?: string;
+};
+export type JournalChange =
+	| { type: "put"; entry: MemoryEntry; expectedRevision: number }
+	| { type: "retain" | "archive"; id: string; expectedRevision: number }
+	| { type: "reset" }
+	| { type: "offer"; receipt: ReviewReceipt }
+	| { type: "review"; receipt: ReviewReceipt }
+	| { type: "draft"; draft: PendingDraft | null; cursor?: string }
+	| { type: "repair"; repair: RepairState }
+	| { type: "import"; sourceId: string; fingerprint: string };
+export type JournalEvent = {
+	schema: 2; eventId: string; operationId: string; at: string;
+	baseRevision: number; changes: JournalChange[]; requestFingerprint?: string;
+};
+export type JournalProjection = {
+	schema: 2; revision: number; entries: Record<string, MemoryEntry>; history: MemoryEntry[];
+	operations: Record<string, string>; requests: Record<string, string>; eventIds: string[]; offers: Record<string, ReviewReceipt>; reviews: ReviewReceipt[];
+	generation: number; compactions: string[]; expiredIds: string[];
+	imports: Record<string, string>; draft: PendingDraft | null; cursor?: string; repair?: RepairState;
 };
 
 /** Total number of lines across draft sections. */

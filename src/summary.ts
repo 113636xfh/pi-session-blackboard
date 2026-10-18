@@ -17,7 +17,7 @@ export interface SummaryOptions {
 
 export type SummarySelection = {
 	text: string | null;
-	reason?: "thin-board" | "invalid-budget" | "over-budget";
+	reason?: "thin-board" | "invalid-budget" | "over-budget" | "protected-over-budget";
 	selected: Array<{ section: Section; entry: BoardEntry }>;
 	omitted: number;
 };
@@ -40,7 +40,7 @@ export function selectSummary(board: Board, opts: SummaryOptions = {}): SummaryS
 		.filter(real).map((entry) => ({ section, entry })))
 		.map((item, order) => ({ ...item, order }));
 	result.omitted = all.length;
-	if (all.length < SUMMARY_MIN_ENTRIES) return { ...result, reason: "thin-board" };
+	if (all.length < (board.revision !== undefined ? 1 : SUMMARY_MIN_ENTRIES)) return { ...result, reason: "thin-board" };
 	// Legacy timestamps can tie; stable traversal order is the deterministic fallback.
 	// v2 supplies the actual event order, independent of section layout.
 	all.sort((a, b) => time(b.entry.ts) - time(a.entry.ts) || (b.entry.order ?? b.order) - (a.entry.order ?? a.order));
@@ -65,7 +65,10 @@ export function selectSummary(board: Board, opts: SummaryOptions = {}): SummaryS
 			`Use \`${recall}\` to search older entries.`];
 		return [...head, ...body, ...footer].join("\n");
 	};
-	for (const candidate of all) {
+	const protectedEntries = all.filter(item => item.entry.retention && item.entry.retention.generation === board.generation);
+	if (protectedEntries.length && render(protectedEntries).length > max) return { ...result, reason: "protected-over-budget" };
+	result.selected.push(...protectedEntries);
+	for (const candidate of all.filter(item => !protectedEntries.includes(item))) {
 		const next = [...result.selected, candidate];
 		if (render(next).length > max) break; // newest prefix, not a knapsack of older short lines
 		result.selected.push(candidate);

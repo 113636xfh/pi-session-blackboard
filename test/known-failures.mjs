@@ -28,8 +28,8 @@ function harness(t) {
   return { hooks, tools, ctx, boardDir };
 }
 
-test('S2/S3 known gap: another branch must not become the current summary', { todo: 'requires branch-scoped journal and cut coverage' }, async t => {
-  const { hooks, ctx, boardDir } = harness(t);
+test('S2: unscoped legacy data must not become the current branch summary', async t => {
+  const { hooks, tools, ctx, boardDir } = harness(t);
   commitEntries(boardDir, 'synthetic', { maxEntriesPerSection: 5, maxEntryChars: 300 }, [
     { section: 'goal', text: 'BRANCH_A implement a feature' },
     { section: 'next', text: 'BRANCH_A continue implementation' },
@@ -41,6 +41,8 @@ test('S2/S3 known gap: another branch must not become the current summary', { to
     turnPrefixMessages: [], isSplitTurn: true,
   } }, ctx);
   assert(!result?.compaction?.summary.includes('BRANCH_A'));
+  const shown = await tools.blackboard.execute('show', { action: 'show' }, undefined, undefined, ctx);
+  assert(!shown.content[0].text.includes('BRANCH_A'));
 });
 
 test('S4 known gap: native Progress preserves done/in-progress/blocked state', { todo: 'requires structured summary import' }, () => {

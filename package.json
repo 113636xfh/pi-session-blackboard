@@ -45,8 +45,8 @@
   },
   "scripts": {
     "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit",
-    "build": "node ./node_modules/typescript/bin/tsc src/index.ts src/extract.ts src/board.ts src/types.ts src/paths.ts src/state.ts src/compact-assist.ts src/summary.ts src/recall.ts src/config.ts --outDir build --module NodeNext --target ES2022 --moduleResolution NodeNext --esModuleInterop --skipLibCheck --strict",
-    "test": "npm run build && node test/smoke.mjs && node --test test/reliability.mjs test/sdk-contract.mjs",
+    "build": "node ./node_modules/typescript/bin/tsc src/index.ts src/journal.ts src/extract.ts src/board.ts src/types.ts src/paths.ts src/state.ts src/compact-assist.ts src/summary.ts src/recall.ts src/config.ts --outDir build --module NodeNext --target ES2022 --moduleResolution NodeNext --esModuleInterop --skipLibCheck --strict",
+    "test": "npm run build && node test/smoke.mjs && node --test test/reliability.mjs test/journal.mjs test/runtime.mjs test/sdk-contract.mjs",
     "test:sdk": "npm run build && node --test test/sdk-contract.mjs",
     "test:known": "npm run build && node --test test/known-failures.mjs",
     "docs:render": "node docs/render.mjs"
