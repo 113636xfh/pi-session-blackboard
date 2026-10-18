@@ -115,7 +115,6 @@ const NON_GOAL_RE =
 const MAX_GOAL_CHARS = 200;
 const LEADING_CHARS = 200;
 
-const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 const stripBullet = (line: string) => line.replace(/^\s*(?:[-*+]|\d+\.)\s+/, "").trim();
 
 function goalLines(text: string): string[] {
@@ -125,7 +124,7 @@ function goalLines(text: string): string[] {
 		if (t.length <= 5 || t.length > MAX_GOAL_CHARS) continue;
 		if (NOISE_SHORT_RE.test(t)) continue;
 		if (NON_GOAL_RE.test(t)) continue;
-		out.push(clip(t, MAX_GOAL_CHARS));
+		out.push(t);
 	}
 	return out;
 }
@@ -182,7 +181,7 @@ export function extractPrefs(users: UserBlock[], existing: string[]): string[] {
 			if (t.length < 5 || t.length > 200) continue;
 			if (t.endsWith("?") || t.includes("?...")) continue;
 			if (!PREF_PATTERNS.some((p) => p.test(t))) continue;
-			const c = clip(t, 200);
+			const c = t;
 			if (seen.has(c.toLowerCase())) continue;
 			seen.add(c.toLowerCase());
 			out.push(c);
@@ -264,7 +263,7 @@ export function extractCommits(tools: ToolBlock[]): string[] {
 		const m = t.output.match(/\[[^\]\n]*\]\s+([0-9a-f]{7,40})\b/) ?? t.output.match(/\b([0-9a-f]{40})\b/);
 		if (!m) continue;
 		const hash = m[1].slice(0, 10);
-		const subject = (t.output.split(m[1]).slice(1).join(" ").trim().split("\n")[0] ?? "").slice(0, 80);
+		const subject = t.output.split(m[1]).slice(1).join(" ").trim().split("\n")[0] ?? "";
 		out.push(`COMMIT ${hash} ${subject}`.trim());
 	}
 	return out;
@@ -356,7 +355,7 @@ export function extractDecisions(assistants: AssistantBlock[]): string[] {
 			const line = stripBullet(raw);
 			if (line.length < 20) continue;
 			if (!DECISION_RE.test(line)) continue;
-			const c = clip(line, 260);
+			const c = line;
 			const key = c.toLowerCase();
 			if (seen.has(key)) continue;
 			seen.add(key);
@@ -382,7 +381,7 @@ export function extractFindings(assistants: AssistantBlock[]): string[] {
 			const line = stripBullet(raw);
 			if (line.length < 15) continue;
 			if (!FINDING_RE.test(line)) continue;
-			const c = clip(line, 260);
+			const c = line;
 			const key = c.toLowerCase();
 			if (seen.has(key)) continue;
 			seen.add(key);
@@ -401,7 +400,7 @@ export function extractNext(assistants: AssistantBlock[], users: UserBlock[]): s
 		const line = stripBullet(raw);
 		if (line.length < 15) return;
 		if (!NEXT_RE.test(line)) return;
-		const c = clip(line, 200);
+		const c = line;
 		const key = c.toLowerCase();
 		if (seen.has(key)) return;
 		seen.add(key);

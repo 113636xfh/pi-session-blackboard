@@ -89,8 +89,14 @@ export function countAll(b: Board): number {
 /** Marks a summary this extension produced (so it is never adopted back in). */
 export const BOARD_SUMMARY_MARKER = "# Session context checkpoint";
 
-/** Below this many real entries the board is not trusted as the summary. */
+/** Legacy rendering floor only; entry count is not proof of safe compaction. */
 export const BOARD_SUMMARY_FLOOR = 3;
+
+/** Transitional minimum context check; v2 additionally requires explicit coverage. */
+export function hasSummaryContext(board: Board): boolean {
+	const real = (section: Section) => board.sections[section].some((entry) => entry.text.trim() && !entry.text.startsWith("(archived)"));
+	return real("goal") && ["next", "issues", "decisions", "findings"].some((s) => real(s as Section));
+}
 
 /** Real (non-pointer) entries on the board. */
 export function countReal(b: Board): number {
@@ -403,9 +409,12 @@ export function writeBoard(boardDir: string, sessionId: string, b: Board): void 
 	writeFileSync(p, renderBoard(b), "utf-8");
 }
 
-/** Sanitize a raw entry line: one line, trimmed, capped. */
+/** Normalize spacing; reject oversized input rather than deleting its final qualifier. */
 export function cleanEntryText(text: string, maxChars: number): string {
-	return text.replace(/\s+/g, " ").trim().slice(0, Math.max(10, maxChars));
+	const clean = text.replace(/\s+/g, " ").trim();
+	if (!Number.isFinite(maxChars) || maxChars < 1) throw new Error("Invalid entry character limit");
+	if (clean.length > maxChars) throw new Error(`Entry has ${clean.length} characters (limit ${maxChars}); write a complete shorter version. Nothing was truncated.`);
+	return clean;
 }
 
 function writeArchiveFile(
@@ -544,6 +553,7 @@ export function commitEntries(
 	cfg: { maxEntriesPerSection: number; maxEntryChars: number },
 	entries: CommitInput[],
 ): CommitResult {
+	const checked = entries.map((entry) => ({ ...entry, text: cleanEntryText(entry.text, cfg.maxEntryChars) }));
 	const board = readBoardFile(boardDir, sessionId);
 	const ts = nowLocal();
 	const archivedFiles: string[] = [];
@@ -554,8 +564,8 @@ export function commitEntries(
 	let committed = 0;
 	let deduped = 0;
 
-	for (const e of entries) {
-		const text = cleanEntryText(e.text, cfg.maxEntryChars);
+	for (const e of checked) {
+		const text = e.text;
 		if (!text) continue;
 
 		// Supersede FIRST, so the line being replaced is out of the board before the

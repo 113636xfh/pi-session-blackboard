@@ -47,6 +47,7 @@ import {
 	countAll,
 	countReal,
 	digest,
+	hasSummaryContext,
 	revalidationCandidates,
 	readBoardFile,
 	renderBoard,
@@ -595,6 +596,10 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
 			}
 			try {
 				const board = readBoardFile(s.cfg.boardDir, s.sessionId);
+				if (!hasSummaryContext(board)) {
+					debug(s, { event: "board_summary_rejected", why: "missing-goal-or-task-context" });
+					return;
+				}
 				const bp = boardPath(s.cfg.boardDir, s.sessionId);
 				const keptNote =
 					"pi keeps the most recent turns verbatim right after this summary (keepRecentTokens), so recent work is not lost — do not restate it here; a one-line forward pointer (\"next step: X\") is enough.";
