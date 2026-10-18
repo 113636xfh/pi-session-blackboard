@@ -616,7 +616,7 @@ check("a findings entry renders in the board and the summary", () => {
 	const md = renderBoard(b);
 	assert.ok(md.includes("## Findings"), "board file has a Findings section");
 	const out = renderSummary(b);
-	assert.ok(out && out.includes("## Key Findings") && out.includes("实测 compact"), "summary carries the finding");
+	assert.ok(out && out.includes("## Critical Context") && out.includes("实测 compact"), "summary carries the finding under Critical Context");
 });
 
 check("merge routes a Findings header into the findings section", () => {

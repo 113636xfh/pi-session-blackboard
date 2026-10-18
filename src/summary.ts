@@ -22,10 +22,29 @@ export type SummarySelection = {
 	omitted: number;
 };
 
-const BLOCKS: Array<[string, Section]> = [
-	["Goal", "goal"], ["Constraints & Preferences", "prefs"], ["Key Decisions", "decisions"],
-	["Key Findings", "findings"], ["Files & Changes", "files"], ["Open Issues", "issues"], ["Next Steps", "next"],
+const GROUPS: Array<{ title: string; match: (item: Selection) => boolean }> = [
+	{ title: "Goal", match: (i) => i.section === "goal" },
+	{ title: "Constraints & Preferences", match: (i) => i.section === "prefs" },
+	{ title: "Progress", match: (i) => i.entry.taskState === "done" || i.entry.taskState === "in_progress" || i.entry.taskState === "blocked" },
+	{ title: "Key Decisions", match: (i) => i.section === "decisions" },
+	{ title: "Next Steps", match: (i) => i.section === "next" && i.entry.taskState !== "done" && i.entry.taskState !== "cancelled" },
+	{ title: "Critical Context", match: (i) => i.section === "findings" },
+	{ title: "Open Issues", match: (i) => i.section === "issues" },
+	{ title: "Files & Changes", match: (i) => i.section === "files" },
 ];
+type Selection = SummarySelection["selected"][number];
+const isRendered = (item: Selection) => GROUPS.some((group) => group.match(item));
+const EPISTEMIC: Record<string, string> = { hypothesis: "hypothesis, not verified", unknown: "unverified" };
+function line(item: Selection): string {
+	const marks = [
+		item.entry.taskState ? `${item.entry.taskState.replace("_", " ")}` : "",
+		EPISTEMIC[item.entry.epistemic ?? "stated"] ?? "",
+		item.entry.retention ? "protected" : "",
+	];
+	const suffix = marks.filter(Boolean).join("; ");
+	return `- ${item.entry.text}${suffix ? ` _(${suffix})_` : ""}`;
+}
+
 const real = (entry: BoardEntry) => !!entry.text.trim() && !entry.text.startsWith("(archived)");
 const time = (stamp: string): number => {
 	const value = Date.parse(stamp.includes("T") ? stamp : stamp.replace(" ", "T"));
@@ -36,8 +55,9 @@ export function selectSummary(board: Board, opts: SummaryOptions = {}): SummaryS
 	const max = opts.maxChars ?? SUMMARY_DEFAULT_MAX_CHARS;
 	const result: SummarySelection = { text: null, selected: [], omitted: 0 };
 	if (!Number.isFinite(max) || max < 1) return { ...result, reason: "invalid-budget" };
-	const all = BLOCKS.flatMap(([, section]) => board.sections[section]
-		.filter(real).map((entry) => ({ section, entry })))
+	const all = SECTIONS.filter((section) => section !== "archived")
+		.flatMap((section) => board.sections[section].filter(real).map((entry) => ({ section: section as Section, entry })))
+		.filter(isRendered)
 		.map((item, order) => ({ ...item, order }));
 	result.omitted = all.length;
 	if (all.length < (board.revision !== undefined ? 1 : SUMMARY_MIN_ENTRIES)) return { ...result, reason: "thin-board" };
@@ -51,11 +71,20 @@ export function selectSummary(board: Board, opts: SummaryOptions = {}): SummaryS
 		...(opts.keptTailNote ? [opts.keptTailNote] : [])];
 	const counts = SECTIONS.map((s) => `${SECTION_HEADERS[s].toLowerCase()}:${board.sections[s].filter(real).length}`).join(", ");
 	const recall = opts.recallTool ?? "blackboard_recall";
-	const render = (selected: SummarySelection["selected"]): string => {
+	const render = (selected: Selection[]): string => {
 		const body: string[] = [];
-		for (const [title, section] of BLOCKS) {
-			const entries = selected.filter((item) => item.section === section);
-			if (entries.length) body.push("", `## ${title}`, ...entries.map(({ entry }) => `- ${entry.text}  _(${entry.ts})_`));
+		for (const group of GROUPS) {
+			const entries = selected.filter((item) => group.match(item));
+			if (!entries.length) continue;
+			body.push("", `## ${group.title}`);
+			if (group.title === "Progress") {
+				for (const state of ["done", "in_progress", "blocked"] as const) {
+					const inState = entries.filter((item) => item.entry.taskState === state);
+					if (!inState.length) continue;
+					body.push("", `### ${state === "in_progress" ? "In Progress" : state === "done" ? "Done" : "Blocked"}`);
+					body.push(...inState.map((item) => `- ${item.entry.text}`));
+				}
+			} else body.push(...entries.map(line));
 		}
 		const omitted = all.length - selected.length;
 		const footer = ["", "---", `Blackboard: ${countReal(board)} entries (${counts}).`,
@@ -68,7 +97,7 @@ export function selectSummary(board: Board, opts: SummaryOptions = {}): SummaryS
 	const protectedEntries = all.filter(item => item.entry.retention && item.entry.retention.generation === board.generation);
 	if (protectedEntries.length && render(protectedEntries).length > max) return { ...result, reason: "protected-over-budget" };
 	result.selected.push(...protectedEntries);
-	for (const candidate of all.filter(item => !protectedEntries.includes(item))) {
+	for (const candidate of all.filter(item => !protectedEntries.includes(item) && isRendered(item))) {
 		const next = [...result.selected, candidate];
 		if (render(next).length > max) break; // newest prefix, not a knapsack of older short lines
 		result.selected.push(candidate);

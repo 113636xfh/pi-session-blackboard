@@ -358,6 +358,28 @@ test('summary ownership is an explicit generator claim, not fromExtension', asyn
   assert(h.notices.length === before, 'our own summary is never imported back into itself');
 });
 
+test('summary output carries Progress state, Critical Context labels and a file trail', async t => {
+  const h = harness(t);
+  await h.invoke({ action: 'commit', entries: [
+    { section: 'goal', text: 'Ship the parser fix' },
+    { section: 'next', text: 'Old plan step that is finished', taskState: 'done' },
+    { section: 'next', text: 'Renderer check running', taskState: 'in_progress' },
+    { section: 'next', text: 'Awaiting approval for deploy', taskState: 'blocked' },
+    { section: 'next', text: 'Add regression fixture', taskState: 'todo' },
+    { section: 'findings', text: 'Cache may be stale; NOT proven', epistemic: 'hypothesis' },
+    { section: 'files', text: 'MODIFIED src/parser.ts' },
+  ] });
+  const offer = (await h.invoke({ action: 'review' })).details.credential;
+  await h.invoke({ action: 'commit', review: { id: offer.id, constraintsChecked: true, executionChecked: true, goalChecked: true } }, 'covered');
+  const out = (await h.hooks.session_before_compact({ reason: 'threshold', preparation: { firstKeptEntryId: null, tokensBefore: 1 } }, h.ctx)).compaction.summary;
+  assert(out.includes('## Progress') && out.includes('### Done') && out.includes('### In Progress') && out.includes('### Blocked'));
+  const next = out.split('## Next Steps')[1].split('##')[0];
+  assert(next.includes('Add regression fixture'), 'unfinished work stays in Next Steps');
+  assert(!next.includes('Old plan step that is finished'), 'a finished task no longer sits in the plan');
+  assert(out.includes('## Critical Context') && out.includes('hypothesis, not verified'));
+  assert(out.includes('## Files & Changes') && out.includes('src/parser.ts'));
+});
+
 test('cooperating writers cannot share a session lock, and release does not delete another owner', t => {
   const h = harness(t), a = new WriterLocks(), b = new WriterLocks();
   t.after(() => { a.release(); b.release(); });
