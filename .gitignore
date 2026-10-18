@@ -16,3 +16,6 @@ tsconfig.build.json
 
 # local per-project agent state (never part of the package)
 .pi/
+eval/results/*.json
+!eval/results/sample.json
+.eval-prefix

@@ -1,0 +1,129 @@
+{
+  "generatedAt": "2026-10-18T09:25:55.443Z",
+  "rounds": 4,
+  "note": "Deterministic scripted agent and in-process model: this measures the compaction pipeline, not model quality.",
+  "rows": [
+    {
+      "arm": "native",
+      "task": "constraint-trap",
+      "status": "ran",
+      "compactions": 4,
+      "summaryChars": 9758,
+      "modelCalls": 9,
+      "summaryCalls": 4,
+      "results": [
+        {
+          "mustContain": "NEVER_RENAME_TABLE_auth",
+          "why": "a hard constraint must survive compaction",
+          "ok": true
+        },
+        {
+          "mustNotContain": "MAY_DROP_INDEX_old",
+          "why": "a retracted instruction must not come back",
+          "ok": false
+        },
+        {
+          "mustContain": "rollback",
+          "why": "current task state must be present",
+          "ok": true
+        }
+      ],
+      "passed": false,
+      "summary": "Round 2. Constraints in force: NEVER_RENAME_TABLE_auth. Retracted: MAY_DROP_INDEX_old. Step: write rollback. [tool output 2.0] write config write migration write rollback :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.1] write config write migration write rollback :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.2] write config write migration write rollback :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.3] write config write migration write rollback :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.4] write config write migration write rollback :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.5] write config write migration write rollback :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.6] write config write migration write rollback :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.7] write config write migration write rollback :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.8] write config write migration write rollback :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.9] write config write migration write rollback :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    {
+      "arm": "native",
+      "task": "blocked-state",
+      "status": "ran",
+      "compactions": 4,
+      "summaryChars": 10398,
+      "modelCalls": 9,
+      "summaryCalls": 4,
+      "results": [
+        {
+          "mustContain": "DO_NOT_TOUCH_PROD_DB",
+          "why": "constraint survives",
+          "ok": true
+        },
+        {
+          "mustContain": "blocked",
+          "why": "blocked state must not become done",
+          "ok": true
+        },
+        {
+          "mustNotContain": "RETRY_MIGRATION_NOW",
+          "why": "superseded plan must not resurrect",
+          "ok": false
+        }
+      ],
+      "passed": false,
+      "summary": "Round 2. Constraints in force: DO_NOT_TOUCH_PROD_DB. Retracted: RETRY_MIGRATION_NOW. Step: record blocked state. [tool output 2.0] inspect schema hit permission error record blocked state :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.1] inspect schema hit permission error record blocked state :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.2] inspect schema hit permission error record blocked state :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.3] inspect schema hit permission error record blocked state :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.4] inspect schema hit permission error record blocked state :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.5] inspect schema hit permission error record blocked state :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.6] inspect schema hit permission error record blocked state :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.7] inspect schema hit permission error record blocked state :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.8] inspect schema hit permission error record blocked state :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.9] inspec"
+    },
+    {
+      "arm": "native",
+      "task": "hypothesis-discipline",
+      "status": "ran",
+      "compactions": 4,
+      "summaryChars": 9954,
+      "modelCalls": 9,
+      "summaryCalls": 4,
+      "results": [
+        {
+          "mustContain": "REPORT_ONLY_MEASURED_VALUES",
+          "why": "constraint survives",
+          "ok": true
+        },
+        {
+          "mustContain": "hypothesis",
+          "why": "an unverified guess keeps its label",
+          "ok": true
+        },
+        {
+          "mustNotContain": "CACHE_IS_STALE",
+          "why": "unproven claim is not promoted",
+          "ok": false
+        }
+      ],
+      "passed": false,
+      "summary": "Round 2. Constraints in force: REPORT_ONLY_MEASURED_VALUES. Retracted: CACHE_IS_STALE. Step: stay unverified. [tool output 2.0] measure latency form hypothesis stay unverified :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.1] measure latency form hypothesis stay unverified :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.2] measure latency form hypothesis stay unverified :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.3] measure latency form hypothesis stay unverified :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.4] measure latency form hypothesis stay unverified :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.5] measure latency form hypothesis stay unverified :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.6] measure latency form hypothesis stay unverified :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.7] measure latency form hypothesis stay unverified :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.8] measure latency form hypothesis stay unverified :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.9] measure latency form hypothesis stay unverified :: 0123456789abcdef0123456789abcdef0123456"
+    },
+    {
+      "arm": "native",
+      "task": "path-fidelity",
+      "status": "ran",
+      "compactions": 4,
+      "summaryChars": 10470,
+      "modelCalls": 9,
+      "summaryCalls": 4,
+      "results": [
+        {
+          "mustContain": "src/parser/Tokens.ts",
+          "why": "exact path survives verbatim",
+          "ok": true
+        },
+        {
+          "mustContain": "src/ui/Render.ts",
+          "why": "second exact path survives",
+          "ok": true
+        },
+        {
+          "mustNotContain": "MOVE_TO_SRC_OLD",
+          "why": "obsolete plan stays out",
+          "ok": false
+        }
+      ],
+      "passed": false,
+      "summary": "Round 2. Constraints in force: USE_EXACT_PATHS. Retracted: MOVE_TO_SRC_OLD. Step: report both. [tool output 2.0] edit src/parser/Tokens.ts edit src/ui/Render.ts report both :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.1] edit src/parser/Tokens.ts edit src/ui/Render.ts report both :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.2] edit src/parser/Tokens.ts edit src/ui/Render.ts report both :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.3] edit src/parser/Tokens.ts edit src/ui/Render.ts report both :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.4] edit src/parser/Tokens.ts edit src/ui/Render.ts report both :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.5] edit src/parser/Tokens.ts edit src/ui/Render.ts report both :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.6] edit src/parser/Tokens.ts edit src/ui/Render.ts report both :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.7] edit src/parser/Tokens.ts edit src/ui/Render.ts report both :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2.8] edit src/parser/Tokens.ts edit src/ui/Render.ts report both :: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef [tool output 2."
+    }
+  ],
+  "summary": [
+    {
+      "arm": "native",
+      "tasks": 4,
+      "ran": 4,
+      "passed": 0,
+      "summaryCalls": 16,
+      "modelCalls": 36
+    }
+  ]
+}

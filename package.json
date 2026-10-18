@@ -51,6 +51,7 @@
     "test:known": "npm run build && node --test test/known-failures.mjs",
     "docs:render": "node docs/render.mjs",
     "test:all": "npm run typecheck && npm test && npm run test:known",
-    "release:check": "npm run typecheck && npm test && npm run test:known && npm pack --dry-run"
+    "release:check": "npm run typecheck && npm test && npm run test:known && npm pack --dry-run",
+    "eval": "node eval/run.mjs"
   }
 }
