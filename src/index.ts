@@ -232,7 +232,14 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
       'Call blackboard action=review to inspect the complete candidates and receive a content-bound credential; commit useful notes and explicitly confirm the reviewed range. skip only discards the draft and does not confirm coverage. Notes need goals, constraints (or explicit none-new), execution state, decisions and uncertainties.');
     return { message: { customType: 'sbb-review-needed', display: false, details: { generation: s.projection.generation }, content: lines.join('\n') } };
   };
-  pi.on('session_start', async (_event, ctx) => { syncTools(ctx); });
+  pi.on('session_start', async (_event, ctx) => {
+    syncTools(ctx);
+    const s = get(ctx);
+    for (const hint of s.cfg.hints ?? []) notify(ctx, `session-blackboard settings: ${hint}`, 'warning');
+    if (!s.cfg.enabled) notify(ctx, 'session-blackboard is disabled: no tools, no notes, no compaction takeover.', 'info');
+    else if (s.cfg.compaction === 'off') notify(ctx, 'session-blackboard: notes are available, compaction stays native (compaction="off").', 'info');
+    else if (s.cfg.compaction === 'board') notify(ctx, 'session-blackboard: the board takes over compaction when its coverage is established.', 'info');
+  });
   pi.on('turn_end', async (event, ctx) => { collectTurn(event, ctx); });
   pi.on('before_agent_start', async (_event, ctx) => { syncTools(ctx); return reminder(ctx); });
   const noticesShown = new Set<string>();

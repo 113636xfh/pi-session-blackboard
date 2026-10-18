@@ -380,6 +380,20 @@ test('summary output carries Progress state, Critical Context labels and a file 
   assert(out.includes('## Files & Changes') && out.includes('src/parser.ts'));
 });
 
+test('off mode keeps notes but never takes over; assist needs an explicit opt-in; legacy settings warn', async t => {
+  const h = harness(t);
+  writeFileSync(join(h.cwd, '.pi/settings.json'), JSON.stringify({ 'session-blackboard': { boardDir: join(h.cwd, 'boards'), compaction: 'off', mirrorToSession: true, seedFromPriorSummary: true, compactAssist: true } }));
+  await h.hooks.session_start({}, h.ctx);
+  const hints = h.notices.map(note => note[0]).join('\n');
+  assert(hints.includes('mirrorToSession is obsolete'));
+  assert(hints.includes('seedFromPriorSummary is obsolete'));
+  assert(hints.includes('compaction stays native'));
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Notes work in off mode' }, { section: 'next', text: 'Do it', taskState: 'todo' }] });
+  assert((await h.invoke({ action: 'show' })).content[0].text.includes('Notes work in off mode'));
+  assert.equal(await h.hooks.session_before_compact({ reason: 'threshold', preparation: { firstKeptEntryId: null, tokensBefore: 1 } }, h.ctx), undefined);
+  assert.equal(h.notices.some(note => /assist|takeover/i.test(note[0]) && /running/i.test(note[0])), false);
+});
+
 test('cooperating writers cannot share a session lock, and release does not delete another owner', t => {
   const h = harness(t), a = new WriterLocks(), b = new WriterLocks();
   t.after(() => { a.release(); b.release(); });
