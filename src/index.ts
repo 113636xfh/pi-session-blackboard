@@ -91,7 +91,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
         }), ...(params.entries ?? [])];
         for (const input of inputs) {
           validateSources(input.sources ?? [], s.branch, s.manager);
-          if (input.origin === 'user' && (!input.sources?.length || input.sources.some(source => source.kind !== 'user'))) throw new Error('User-origin notes require actual user-message sources; tool content is not authorization');
+          if (input.origin === 'user' && (!input.sources?.length || input.sources.some(source => source.kind !== 'user'))) throw new Error('User-origin notes require actual user-message sources; tool content is not authorization. For an agent-authored note or paraphrase, omit origin (defaults to assistant) or set origin="assistant". To claim user origin, call action="review" and attach the matching user SourceRef from its credential; never invent source IDs or fingerprints.');
         }
         const review = params.review ? validateReview(s.projection, params.review, s.branch, s.manager) : undefined;
         const event = inputs.length ? planCommit(s.projection, inputs, operationId, undefined, request) : null;
@@ -156,18 +156,29 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     promptGuidelines: [
       'Record important goals, constraints, decisions, findings, task state and next actions as complete notes with their negative/uncertain qualifiers.',
       'A changed file does not prove an issue resolved. Use explicit task states and evidence.',
+      'For ordinary notes or paraphrases omit origin (defaults to assistant). origin=user requires matching user-message SourceRefs from a review credential; a note about a user instruction is not automatically user-origin evidence. Never invent source IDs or fingerprints.',
+      'Review is two separate complete tool calls: first {"action":"review"} with no nested review object; after reading its credential, call {"action":"commit","review":{"id":"review-...","constraintsChecked":true,"executionChecked":true,"goalChecked":true}}. Use the returned credential ID, not a note ID; set flags only after checking that range.',
       'After compaction restore notes with blackboard show; use blackboard_recall for a specific earlier fact. There is no default Markdown board to read.',
     ],
     parameters: Type.Object({
-      action: Type.Union(['commit', 'skip', 'show', 'archive', 'review', 'retain'].map(value => Type.Literal(value))),
+      action: Type.Union(['commit', 'skip', 'show', 'archive', 'review', 'retain'].map(value => Type.Literal(value)), {
+        description: 'Required in every call. commit writes notes or confirms a returned review credential; review only requests that credential (call {"action":"review"} without a nested review field); show reads notes; skip discards a draft; archive moves an entry; retain grants one-compaction priority.',
+      }),
       entries: Type.Optional(Type.Array(Type.Object({
         section: Type.Optional(Type.Union(SECTIONS.filter(section => section !== 'archived').map(section => Type.Literal(section)))),
-        text: Type.Optional(Type.String()), supersedes: Type.Optional(Type.String()),
-        id: Type.Optional(Type.String()), expectedRevision: Type.Optional(Type.Integer({ minimum: 1 })),
+        text: Type.Optional(Type.String()),
+        supersedes: Type.Optional(Type.String({ description: 'Legacy text-match replacement: a unique substring of the OLD note text, NOT an m-... entry ID. For an ID update use id plus its current expectedRevision instead. Omit for a new note.' })),
+        id: Type.Optional(Type.String({ description: 'Existing m-... note ID for an update; must also pass that note\'s current expectedRevision. Omit for a new note. Do not use note IDs as review credential IDs.' })),
+        expectedRevision: Type.Optional(Type.Integer({ minimum: 1, description: 'Required with an entry id; use the current revision shown as id@revision. Do not guess it.' })),
         taskState: Type.Optional(Type.Union(['todo', 'in_progress', 'blocked', 'done', 'cancelled'].map(value => Type.Literal(value)))),
         epistemic: Type.Optional(Type.Union(['stated', 'hypothesis', 'unknown'].map(value => Type.Literal(value)))),
-        origin: Type.Optional(Type.Union(['user', 'tool', 'assistant', 'native-summary', 'legacy'].map(value => Type.Literal(value)))),
-        sources: Type.Optional(Type.Array(Type.Object({ entryId: Type.String(), fingerprint: Type.String(), kind: Type.Union(['user', 'tool', 'assistant', 'native-summary', 'legacy'].map(value => Type.Literal(value))), callId: Type.Optional(Type.String()) }))),
+        origin: Type.Optional(Type.Union(['assistant', 'user', 'tool', 'native-summary', 'legacy'].map(value => Type.Literal(value)), {
+          description: 'Omit for ordinary agent-authored notes/paraphrases (default assistant). user is allowed only with matching user-message SourceRefs in sources; get exact refs from action=review. Merely repeating a user instruction does not justify user origin.',
+          default: 'assistant',
+        })),
+        sources: Type.Optional(Type.Array(Type.Object({ entryId: Type.String(), fingerprint: Type.String(), kind: Type.Union(['user', 'tool', 'assistant', 'native-summary', 'legacy'].map(value => Type.Literal(value))), callId: Type.Optional(Type.String()) }), {
+          description: 'Optional exact SourceRefs from action=review credential.range; never invent entry IDs or fingerprints. Omit for an unscoped assistant note. Required with matching kind=user when origin=user.',
+        })),
         verification: Type.Optional(Type.String()), retain: Type.Optional(Type.Boolean()), legacyUnscoped: Type.Optional(Type.Boolean()),
         validity: Type.Optional(Type.Union(['active', 'superseded', 'retracted'].map(value => Type.Literal(value)))),
       }))),
@@ -176,7 +187,10 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
       offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 60 })),
       history: Type.Optional(Type.Boolean()),
       operationId: Type.Optional(Type.String()), id: Type.Optional(Type.String()), expectedRevision: Type.Optional(Type.Integer()),
-      review: Type.Optional(Type.Object({ id: Type.String(), constraintsChecked: Type.Boolean(), executionChecked: Type.Boolean(), goalChecked: Type.Boolean() })),
+      review: Type.Optional(Type.Object({
+        id: Type.String({ description: 'Exact review-... credential ID returned by an earlier action=review, never an m-... note ID.' }),
+        constraintsChecked: Type.Boolean(), executionChecked: Type.Boolean(), goalChecked: Type.Boolean(),
+      }, { description: 'Only for action=commit: confirms a previously returned review credential after actually checking its range. Omit this field when requesting action=review. All three flags must be true to confirm.' })),
     }),
     execute: async (id, params, _signal, _update, ctx) => {
       const dedicated = dedicatedRepair(ctx);

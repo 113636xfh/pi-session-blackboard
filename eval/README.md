@@ -3,9 +3,14 @@
 ## Status: 46/52 plan steps complete, release gate still open
 
 The current entry point is a **small wiring smoke**, not a public benchmark or a
-validated quality/cost comparison. It exercises a real pi 1.3.0 session, extension
-loading, actual fixture-file writes, one persisted **manual** compaction, and a
-post-compaction continuation. It does not verify repeated automatic compaction,
+validated quality/cost comparison. The 2026-10-19 repair-and-retest run completed
+all three small cases; see [the full ledger](smoke-evidence-20261019.json), including
+all failed attempts (383.998 seconds cumulatively, 47 requests). Successful cases
+span repairs and are not a frozen-version performance comparison.
+
+The smoke exercises a real pi 1.3.0 session, extension loading, actual fixture-file
+writes, one persisted **manual** compaction, and a post-compaction continuation.
+It does not verify repeated automatic compaction,
 8/16 compaction cycles, or the remaining release gates.
 
 **Earlier evaluation tables are withdrawn as comparative evidence.** The old
@@ -39,8 +44,11 @@ arguments, invalid selectors, missing baselines, reused output paths, unavailabl
 models and baseline changes fail closed, before paid work. Live mode is capped
 at two user rounds, six tool calls per phase, twenty model requests per case and
 600 seconds for the entire batch. These are smoke ceilings, not permission to
-run whenever resources become available. After a failure, **do not silently
-retry with a modified prompt**.
+run whenever resources become available. After a failure, stop that attempt and
+inspect/fix/test offline. When the user authorizes repair-and-retest, resume only
+the failed arm and carry forward **all elapsed live time** against the same
+cumulative cap. Otherwise obtain permission. Do not reset the budget, drop failed
+attempts or rerun already-completed arms just to obtain a green matrix.
 
 ## What is fixed across arms
 

@@ -11,7 +11,7 @@ npm run test:known
 - `npm test`: the 54-check smoke suite plus reliability, journal, import, runtime, storage/platform, real-SDK and offline evaluation regressions. No paid model requests.
 - `npm run test:sdk`: build and run just the real-SDK contract tests.
 - `npm run test:known`: three historical failure regressions, now passing with no TODO markers: cross-branch contamination, native progress state and retrieval beyond 55 archives.
-- `npm run test:eval`: eleven offline acceptance checks for the exact evaluation entry/supervisor/worker chain, including Windows quoting, three-arm compaction/resume, hard deadlines, uncooperative models, extra writes, request/tool limits and fail-fast reporting. The old baseline is exercised when its local worktree is present; CI must not download it implicitly. See `eval/AUDIT.md` and `eval/README.md`.
+- `npm run test:eval`: twelve offline acceptance checks for the exact evaluation entry/supervisor/worker chain, including Windows quoting, three-arm compaction/resume, hard deadlines, uncooperative models, extra writes, request/tool limits, fail-fast reporting and cumulative repair-budget accounting. The old baseline is exercised when its local worktree is present; CI must not download it implicitly. See `eval/AUDIT.md` and `eval/README.md`.
 
 ## What the SDK contract actually checks
 

@@ -72,7 +72,7 @@ export function systemPrompt(arm) {
   const base = 'Controlled synthetic wiring smoke. Work only on the requested local fixture. Never claim unperformed work. Be brief.';
   if (arm.id === 'native') return `${base} Write only the single requested fixture file each round, then report state in one sentence. There is no notes tool. Do not create any additional files.`;
   if (arm.id === 'board-prefix') return `${base} After each step, commit concise goal, constraint, current state and exact paths with blackboard action=commit. This version has no review action. Then stop.`;
-  return `${base} After each step, commit concise goal, constraint, current state and exact paths. Then call blackboard action=review once and confirm that credential with action=commit, review={id,constraintsChecked:true,executionChecked:true,goalChecked:true}. Then stop; do not repeat the review.`;
+  return `${base} After each step, commit concise goal, constraint, current state and exact paths. For ordinary notes in this fixture use {"action":"commit","entries":[{"section":"goal","text":"your note"}]} with appropriate sections and your actual notes. Entry objects must contain only section and text: omit origin, sources, IDs, revision and retention fields. These are agent-authored notes, not provenance claims. Then make the separate complete call {"action":"review"}. Read the returned credential.id, then make {"action":"commit","review":{"id":"the actual returned review-... ID","constraintsChecked":true,"executionChecked":true,"goalChecked":true}} after checking its range. Never invent source or credential IDs. Then stop; do not repeat the review.`;
 }
 export function roundPrompt(task, round, arm) {
   const step = task.steps[Math.min(round, task.steps.length - 1)];

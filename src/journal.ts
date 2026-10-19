@@ -148,7 +148,7 @@ export function planCommit(projection: JournalProjection, inputs: CommitInput[],
     if (input.supersedes) {
       assert(!input.id, 'choose ID or supersedes, not both');
       const matches = Object.values(working.entries).filter(entry => entry.validity === 'active' && entry.text.includes(input.supersedes!));
-      assert(matches.length === 1, 'supersedes must match exactly one active entry'); old = matches[0];
+      assert(matches.length === 1, 'supersedes must match exactly one active entry by a unique substring of its old text, not an entry ID; for ID updates use id plus current expectedRevision'); old = matches[0];
     }
     const text = (input.text ?? old?.text ?? '').replace(/\s+/g, ' ').trim();
     const section = input.section ?? old?.section;

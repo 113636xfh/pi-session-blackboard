@@ -23,9 +23,24 @@ test('live is explicit, unknown arguments fail closed, small-batch ceiling and e
   assert.throws(() => parse(['--rounds', 'NaN']), /Invalid/);
   assert(!systemPrompt(config.arms[0]).includes('blackboard'));
   assert(!systemPrompt(config.arms[1]).includes('action=review'));
+  assert(systemPrompt(config.arms[2]).includes('Entry objects must contain only section and text'));
+  assert(systemPrompt(config.arms[2]).includes('Never invent source or credential IDs'));
   const nativePrompt = roundPrompt(config.tasks.at(-1), 0, config.arms[0]);
   assert(nativePrompt.includes('Do not create a notes file'));
   assert(!nativePrompt.includes('Commit concise notes'));
+});
+
+test('repair-and-retest ledger retains failed attempts within the original cumulative cap', () => {
+  const ledger = json(resolve(ROOT, 'eval/smoke-evidence-20261019.json'));
+  const seconds = ledger.attempts.reduce((sum, attempt) => sum + attempt.wallSeconds, 0);
+  const requests = ledger.attempts.reduce((sum, attempt) => sum + attempt.runtimeRequests, 0);
+  assert(Math.abs(seconds - ledger.observedCumulativeWallSeconds) < 0.001);
+  assert(seconds <= ledger.authorizedCumulativeWallSeconds);
+  assert.equal(requests, ledger.costAccounting.runtimeObservedRequests);
+  assert.equal(ledger.completedCases.length, 3);
+  assert(ledger.attempts.length > ledger.completedCases.length, 'failed attempts must not be hidden by success-only accounting');
+  assert.equal(ledger.costAccounting.monetaryCostCNY, null);
+  assert.equal(ledger.costAccounting.independentlyMeteredGPUSeconds, null);
 });
 
 test('failed, missing and interrupted evidence is not success; unknown counts stay unknown', () => {

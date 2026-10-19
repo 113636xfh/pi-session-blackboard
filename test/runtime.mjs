@@ -72,6 +72,36 @@ test('tool observations cannot be declared user authorization', async t => {
   await assert.rejects(() => h.invoke({ action: 'commit', entries: [{ section: 'prefs', text: 'Approved to write', origin: 'user', sources: [toolSource] }] }), /actual user/);
 });
 
+test('ordinary note provenance is actionable without weakening the user-source gate', async t => {
+  const h = harness(t);
+  const originSchema = h.tools.blackboard.parameters.properties.entries.items.properties.origin;
+  assert.equal(originSchema.default, 'assistant');
+  assert.match(originSchema.description, /Omit for ordinary/);
+  const params = h.tools.blackboard.parameters.properties;
+  assert.match(params.action.description, /Required in every call/);
+  assert.match(params.review.description, /Only for action=commit/);
+  assert.match(params.review.properties.id.description, /never an m-/);
+  assert.match(params.entries.items.properties.supersedes.description, /NOT an m-/);
+  assert.match(params.entries.items.properties.id.description, /expectedRevision/);
+  const text = 'User requests read-only inspection; agent paraphrase, not new authorization';
+  const before = h.branch.length;
+  await assert.rejects(() => h.invoke({ action: 'commit', entries: [{ section: 'prefs', text, origin: 'user' }] }, 'bad-provenance'), /omit origin.*defaults to assistant/);
+  assert.equal(h.branch.length, before, 'rejection cannot partially commit an unsupported user-origin claim');
+  const ordinary = await h.invoke({ action: 'commit', entries: [{ section: 'prefs', text }] }, 'ordinary-note');
+  const ordinaryId = ordinary.details.ids[0];
+  assert.equal(h.projection().entries[ordinaryId].origin, 'assistant');
+  const beforeBadUpdate = h.branch.length;
+  await assert.rejects(() => h.invoke({ action: 'commit', entries: [{ section: 'prefs', text: 'Updated note', supersedes: ordinaryId }] }, 'bad-id-in-supersedes'), /unique substring.*not an entry ID/);
+  assert.equal(h.branch.length, beforeBadUpdate);
+  await h.invoke({ action: 'commit', entries: [{ id: ordinaryId, expectedRevision: 1, text: 'Updated agent paraphrase; still not authorization' }] }, 'correct-id-update');
+  assert.equal(h.projection().entries[ordinaryId].revision, 2);
+  const offer = (await h.invoke({ action: 'review' }, 'source-review')).details.credential;
+  const actualUser = offer.range.find(source => source.kind === 'user');
+  assert(actualUser);
+  const sourced = await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Review synthetic project', origin: 'user', sources: [actualUser] }] }, 'sourced-user');
+  assert.equal(h.projection().entries[sourced.details.ids[0]].origin, 'user');
+});
+
 test('legacy dry-run does not write; explicit migration preserves bytes, unknown blocks and restart idempotency', async t => {
   const h = harness(t), dir = join(h.cwd, 'boards'); mkdirSync(dir);
   const old = '# Session Blackboard\nUnknown preamble; NOT VERIFIED\n## Goal\n- [2026-01-01 10:00] OLD BRANCH GOAL\n## Unusual Section\nDo not drop this unknown block\n';

@@ -96,8 +96,22 @@ request is in flight or after it was delivered-and-ignored (that one becomes owe
 once more, spending the second allowance), and the deterministic suite covers both
 paths. The live reproduction of the loop was not confirmed afterwards, so:
 
-**Status: not released.** The gate above is still open, with the manual-compaction
-takeover and the cancel-without-delivery class of bug as the two open items.
+### Small repair-and-retest smoke (2026-10-19)
+
+All three arms completed two fixture-writing user rounds, one persisted manual
+compaction and a resumed response. The fixed arm's inspected summary preserved
+both exact paths, with one board takeover and zero native summarizer requests
+(11 total model requests). Invalid user-source claims and malformed tool
+arguments were rejected in preceding attempts; the tool/schema/protocol guidance
+was clarified without weakening provenance or revision checks. All failed
+attempts remain in [the ledger](../eval/smoke-evidence-20261019.json); cumulative
+supervised live time was 383.998 seconds within the shared 600-second cap.
+
+**Status: not released.** A small manual takeover has now been observed, but this
+smoke did not exercise consecutive automatic compactions in the same session.
+The full same-session gate, post-fix live repair-delivery/auto-compaction checks,
+and real-board migration gate above remain open. No quality/cost advantage is
+inferred from cases collected across repairs.
 
 ## Rollback
 
