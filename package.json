@@ -46,13 +46,13 @@
   "scripts": {
     "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit",
     "build": "node ./node_modules/typescript/bin/tsc src/index.ts src/journal.ts src/summary-import.ts src/extract.ts src/export.ts src/migration.ts src/coverage.ts src/storage.ts src/board.ts src/types.ts src/paths.ts src/state.ts src/compact-assist.ts src/summary.ts src/recall.ts src/config.ts --outDir build --module NodeNext --target ES2022 --moduleResolution NodeNext --esModuleInterop --skipLibCheck --strict",
-    "test": "npm run build && node test/smoke.mjs && node --test test/reliability.mjs test/journal.mjs test/summary-import.mjs test/runtime.mjs test/faults.mjs test/platform.mjs test/sdk-contract.mjs test/eval.mjs",
+    "test": "npm run build && node test/smoke.mjs && node --test test/reliability.mjs test/journal.mjs test/summary-import.mjs test/runtime.mjs test/faults.mjs test/platform.mjs test/sdk-contract.mjs test/eval.mjs test/long-eval.mjs",
     "test:sdk": "npm run build && node --test test/sdk-contract.mjs",
     "test:known": "npm run build && node --test test/known-failures.mjs",
     "docs:render": "node docs/render.mjs",
     "test:all": "npm run typecheck && npm test && npm run test:known",
     "release:check": "npm run typecheck && npm test && npm run test:known && npm pack --dry-run",
-    "test:eval": "node --test test/eval.mjs",
+    "test:eval": "node --test test/eval.mjs test/long-eval.mjs",
     "eval:preflight": "node eval/preflight.mjs",
     "eval": "node eval/nightly.mjs"
   }

@@ -22,4 +22,6 @@ eval/results/*.json
 eval/vendor/
 eval/results/*.log
 eval/results/smoke-*/
+eval/results/long-*/
+eval/results/scheduler-proof-*/
 eval/results/live-smoke.lock

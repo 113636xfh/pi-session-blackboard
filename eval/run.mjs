@@ -4,11 +4,17 @@ import { join, resolve } from 'node:path';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import { ROOT, config, save, systemPrompt, roundPrompt, fixturePath, resumePrompt } from './protocol.mjs';
+import { LONG_PROTOCOL, longTask, longRound, longWrite, longSystem, expectedState, evaluateLongAnswer } from './long-protocol.mjs';
+import { snapshotProbe } from './long-probe.mjs';
+import { assertAuthorizedSpec } from './long-auth.mjs';
+import { recoverableNoteError } from './long-errors.mjs';
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 const textOf = message => typeof message.content === 'string' ? message.content : (message.content ?? []).filter(p => p.type === 'text').map(p => p.text).join('\n');
 
 export async function worker(spec) {
-  const { arm, dir } = spec, task = config.tasks.find(t => t.id === spec.task);
+  const isLong = spec.protocol === LONG_PROTOCOL;
+  if (isLong) assertAuthorizedSpec(spec);
+  const { arm, dir } = spec, task = isLong ? longTask : config.tasks.find(t => t.id === spec.task);
   const extension = arm.extension ? resolve(ROOT, arm.extension) : null;
   const project = join(dir, 'project'); mkdirSync(join(project, '.pi'), { recursive: true });
   // Old code falls back to process.cwd() when SDK contexts omit cwd. Isolate that too.
@@ -16,15 +22,15 @@ export async function worker(spec) {
   writeFileSync(join(project, '.pi/settings.json'), JSON.stringify({ 'session-blackboard': {
     boardDir: join(project, 'boards'), compaction: arm.compaction ?? 'off', debugLog: true,
   } }));
-  let session, round = 0, cycle = 1, phase = 'startup', phaseRequest = 0, phaseTools = 0, fatal = null, failureKind = null;
+  let session, activeSession, round = 0, cycle = 1, phase = 'startup', phaseRequest = 0, phaseTools = 0, phaseCalls = 0, noteWrites = 0, fatal = null, failureKind = null;
   const cycles = spec.cycles ?? 1;
-  const requests = [], toolTrail = [], errors = [], cycleResults = [];
+  const requests = [], toolTrail = [], errors = [], toolErrors = [], cycleResults = [];
   const started = Date.now();
-  const progress = { status: 'running', phase, completedRounds: 0, completedCycles: 0, modelCalls: 0, requests, toolTrail };
-  const persist = () => save(join(dir, 'progress.json'), { ...progress, phase, cycle, wallMs: Date.now() - started, fatal, failureKind });
+  const progress = { status: 'running', pid: process.pid, phase, completedRounds: 0, completedCycles: 0, modelCalls: 0, requests, toolTrail };
+  const persist = () => save(join(dir, 'progress.json'), { ...progress, phase, cycle, toolErrorCount: toolErrors.length, wallMs: Date.now() - started, fatal, failureKind });
   const fail = (reason, kind = 'model-or-tool') => {
     if (!fatal) { fatal = reason; failureKind = kind; }
-    try { persist(); } finally { if (session) void session.abort().catch(() => {}); }
+    try { persist(); } finally { if (activeSession ?? session) void (activeSession ?? session).abort().catch(() => {}); }
   };
   persist();
   let fetchCalls = 0;
@@ -45,8 +51,14 @@ export async function worker(spec) {
         const stream = createAssistantMessageEventStream();
         // Fault injection is unreachable in live mode: exercise cancellation without a GPU.
         if (spec.fixtureFault === 'hang') { setInterval(() => {}, 1000); return stream; }
-        const step = phaseRequest++, stepText = task.steps[Math.min(round, task.steps.length - 1)];
-        const notes = [
+        const step = phaseRequest++, stepText = isLong ? longWrite(cycle, round) : task.steps[Math.min(round, task.steps.length - 1)];
+        const state = isLong ? expectedState(cycle) : null;
+        const notes = isLong ? [
+          { section: 'goal', text: `STATE_SLOT_GOAL ${state.objective}` },
+          { section: 'prefs', text: `STATE_SLOT_CONSTRAINT ${state.constraint}; deployApproved=${state.deployApproved}` },
+          { section: 'findings', text: `STATE_SLOT_CONTEXT path=${state.path}; hypothesis=${state.hypothesis}` },
+          { section: 'next', text: `STATE_SLOT_PROGRESS status=${state.status}; next=${state.next}`, ...(arm.id === 'board-fixed' ? { taskState: state.status } : {}) },
+        ].map(e => ({ ...e, ...(noteWrites ? { supersedes: e.text.split(' ')[0] } : {}) })) : [
           { section: 'goal', text: `Complete fixture: ${task.steps.join(', ')}` },
           { section: 'prefs', text: `Constraint: ${task.constraint}` },
           { section: 'next', text: `Fixture step ${round + 1} complete; next ${task.steps[Math.min(round + 1, task.steps.length - 1)]}` },
@@ -57,20 +69,21 @@ export async function worker(spec) {
         let call = null;
         if (phase.startsWith('round')) {
           if (step === 0) call = { name: 'write', arguments: { path: fixturePath(cycle, round, cycles), content: stepText } };
-          else if (arm.extension && step === 1) call = { name: 'blackboard', arguments: { action: 'commit', entries: notes } };
+          else if (arm.extension && step === 1) { call = { name: 'blackboard', arguments: { action: 'commit', entries: notes } }; noteWrites++; }
           else if (arm.id === 'board-fixed' && step === 2) call = { name: 'blackboard', arguments: { action: 'review' } };
           else if (arm.id === 'board-fixed' && step === 3 && credential) call = { name: 'blackboard', arguments: { action: 'commit', review: { id: credential, constraintsChecked: true, executionChecked: true, goalChecked: true } } };
         }
         if (spec.fixtureFault === 'tool-loop' && phase.startsWith('round')) call = { name: 'write', arguments: { path: fixturePath(cycle, round, cycles), content: stepText } };
         if (spec.fixtureFault === 'extra-write' && step === 1) call = { name: 'write', arguments: { path: 'fixture/blackboard.md', content: 'unauthorized extra write' } };
-        const text = phase === 'compact' || phase === 'resume'
+        const text = isLong && phase === 'resume' ? (spec.fixtureFault === 'probe-bad-json' ? 'not json' : JSON.stringify(spec.fixtureFault === 'probe-wrong-state' ? { ...state, deployApproved: true } : state)) : phase === 'compact' || phase === 'resume'
           ? `## Goal\n${task.steps.join(', ')}\n## Constraints & Preferences\n${task.constraint}\n## Progress\nFixture step ${spec.rounds} complete.\n## Next Steps\n${task.steps.at(-1)}\n`
           : `Fixture step ${round + 1} complete.`;
         const message = { role: 'assistant', api: model.api, provider: model.provider, model: model.id,
           content: call ? [{ type: 'toolCall', id: `call-${cycle}-${round}-${step}`, ...call }] : [{ type: 'text', text }],
           stopReason: call ? 'toolUse' : 'stop', timestamp: Date.now(),
           usage: { input: Math.ceil(context.messages.map(textOf).join('').length / 4), output: 80, cacheRead: 0, cacheWrite: 0, totalTokens: 100, cost: ZERO_COST } };
-        if (spec.fixtureFault === 'model-error') { message.stopReason = 'error'; message.errorMessage = 'injected model failure'; }
+        if (spec.fixtureFault === 'model-error' || (spec.fixtureFault === 'probe-transport' && phase === 'resume')) { message.stopReason = 'error'; message.errorMessage = 'injected model failure'; }
+        if (spec.fixtureFault === 'probe-evidence-io' && phase === 'resume') mkdirSync(join(dir, 'requests', String(requests.at(-1).id), 'response.json'), { recursive: true });
         queueMicrotask(() => {
           stream.push({ type: 'start', partial: message });
           stream.push(message.stopReason === 'error' ? { type: 'error', reason: 'error', error: message } : { type: 'done', reason: message.stopReason, message });
@@ -88,24 +101,36 @@ export async function worker(spec) {
       const original = runtime[method].bind(runtime);
       runtime[method] = (selectedModel, context, options) => {
         if (fatal) throw new Error(fatal);
+        if (isLong) assertAuthorizedSpec(spec);
+        if (isLong && phase === 'resume' && phaseCalls >= 1) {
+          if (activeSession) void activeSession.abort().catch(() => {});
+          throw new Error('Read-only probe exceeded its one-request budget');
+        }
+        phaseCalls++;
         if (requests.length >= spec.maxRequests) { fail('request budget exceeded', 'budget'); throw new Error(fatal); }
-        const record = { id: requests.length + 1, phase, cycle, kind: phase === 'compact' ? 'summarizer' : 'agent', method, startedMs: Date.now() - started, completed: false };
+        const record = { id: requests.length + 1, phase, cycle, kind: phase === 'compact' ? 'summarizer' : isLong && phase === 'resume' ? 'probe' : 'agent', method, startedMs: Date.now() - started, completed: false };
         requests.push(record); progress.modelCalls = requests.length; persist();
-        const stream = original(selectedModel, context, { ...options, maxTokens: spec.maxTokens, temperature: 0,
+        const visibleContext = isLong && phase === 'resume' ? { ...context, tools: [] } : context;
+        if (isLong) {
+          record.inputPath = join(dir, 'requests', String(record.id), 'context.json');
+          save(record.inputPath, { systemPrompt: visibleContext.systemPrompt, messages: visibleContext.messages, tools: visibleContext.tools });
+        }
+        const stream = original(selectedModel, visibleContext, { ...options, maxTokens: spec.maxTokens, temperature: 0,
           timeoutMs: Math.min(60000, spec.caseSeconds * 1000), maxRetries: 0 });
         observations.push(stream.result().then(message => {
           record.completed = true; record.wallMs = Date.now() - started - record.startedMs;
           record.stopReason = message.stopReason; record.usage = message.usage ?? null;
-          if (!fatal && ['error', 'aborted', 'length'].includes(message.stopReason)) { fatal = `model response ${message.stopReason}: ${message.errorMessage ?? ''}`; failureKind = 'model'; }
+          if (isLong) { record.outputPath = join(dir, 'requests', String(record.id), 'response.json'); save(record.outputPath, message); }
+          if (!fatal && record.kind !== 'probe' && ['error', 'aborted', 'length'].includes(message.stopReason)) { fatal = `model response ${message.stopReason}: ${message.errorMessage ?? ''}`; failureKind = 'model'; }
           persist();
-        }).catch(error => { fatal ??= error.message; persist(); }));
+        }).catch(error => { record.error = error.message; fatal ??= error.message; persist(); }));
         return stream;
       };
     }
     const settings = SettingsManager.inMemory({ compaction: { enabled: false, reserveTokens: 4096, keepRecentTokens: spec.tail }, retry: { enabled: false } });
     const loader = new DefaultResourceLoader({ cwd: project, agentDir: join(project, 'agent'), settingsManager: settings,
       noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true,
-      systemPrompt: systemPrompt(arm), ...(extension ? { additionalExtensionPaths: [extension] } : {}),
+      systemPrompt: isLong ? longSystem(arm) : systemPrompt(arm), ...(extension ? { additionalExtensionPaths: [extension] } : {}),
       extensionFactories: [pi => {
         pi.on('tool_call', event => {
           phaseTools++;
@@ -119,6 +144,7 @@ export async function worker(spec) {
             if (resolve(project, event.input.path) !== expected) fail('write outside the requested fixture path');
           }
           persist();
+          if (!spec.live && spec.fixtureFault === 'note-eio' && event.toolName === 'blackboard') return { block: true, reason: 'EIO injected note-tool failure' };
           if (fatal) return { block: true, reason: fatal };
         });
       }],
@@ -129,21 +155,26 @@ export async function worker(spec) {
     const created = await createAgentSession({ cwd: project, agentDir: join(project, 'agent'), modelRuntime: runtime,
       model, thinkingLevel: 'off', sessionManager: manager, settingsManager: settings, resourceLoader: loader,
       tools: ['write', ...(arm.extension ? ['blackboard', 'blackboard_recall'] : [])] });
-    session = created.session;
+    session = created.session; activeSession = session;
     session.subscribe(event => {
-      if (event.type === 'tool_execution_end' && event.isError) fail(`tool failed: ${event.toolName}: ${JSON.stringify(event.result).slice(0, 800)}`);
+      if (event.type === 'tool_execution_end' && event.isError) {
+        toolErrors.push({ cycle, phase, tool: event.toolName, result: event.result }); persist();
+        // In long diagnostics a rejected note is observable model behavior; permit bounded
+        // self-correction. Failed writes/path violations and infrastructure still abort.
+        if (!isLong || !recoverableNoteError(event.toolName, event.result)) fail(`tool failed: ${event.toolName}: ${JSON.stringify(event.result).slice(0, 800)}`);
+      }
     });
     await session.bindExtensions({ mode: 'print', onError: error => { errors.push(String(error)); fail(`extension error: ${String(error)}`, 'extension'); } });
     save(join(dir, 'settings.json'), { compaction: settings.getCompactionSettings(model), activeTools: session.getActiveToolNames?.() ?? null });
-    const begin = name => { phase = name; phaseRequest = 0; phaseTools = 0; persist(); console.log(`PHASE ${name}`); };
+    const begin = name => { phase = name; phaseRequest = 0; phaseTools = 0; phaseCalls = 0; persist(); console.log(`PHASE ${name}`); };
     for (cycle = 1; cycle <= cycles; cycle++) {
       for (round = 0; round < spec.rounds; round++) {
         begin(`round-${round + 1}`);
-        await session.prompt(roundPrompt(task, round, arm, cycle, cycles));
+        await session.prompt(isLong ? longRound(cycle, round, arm, fixturePath(cycle, round, cycles)) : roundPrompt(task, round, arm, cycle, cycles));
         await Promise.all(observations);
         if (fatal) throw new Error(fatal);
         const path = resolve(project, fixturePath(cycle, round, cycles));
-        if (!existsSync(path) || readFileSync(path, 'utf8').trim() !== task.steps[Math.min(round, task.steps.length - 1)]) {
+        if (!existsSync(path) || readFileSync(path, 'utf8').trim() !== (isLong ? longWrite(cycle, round) : task.steps[Math.min(round, task.steps.length - 1)])) {
           failureKind = 'task-output'; throw new Error(`Missing or wrong fixture file: ${path}`);
         }
         progress.completedRounds++; persist();
@@ -158,34 +189,43 @@ export async function worker(spec) {
       save(join(dir, 'compaction.json'), compacted);
       save(join(dir, 'cycles', String(cycle), 'compaction.json'), compacted);
       begin('resume');
-      await session.prompt(resumePrompt);
+      let probe = null;
+      if (isLong) probe = await snapshotProbe({ manager, runtime, model, extension, project, dir, cycle, arm, tail: spec.tail,
+        onActive: target => { activeSession = target ?? session; },
+        onFailure: reason => { fatal ??= reason; failureKind = 'probe-execution'; persist(); }, fault: spec.live ? null : spec.fixtureFault });
+      else await session.prompt(resumePrompt);
       await Promise.all(observations);
       if (fatal) throw new Error(fatal);
       const branch = manager.getBranch();
       const lastAssistant = [...branch].reverse().find(e => e.message?.role === 'assistant');
-      const answer = textOf(lastAssistant?.message ?? {});
+      const answer = isLong ? probe.answer : textOf(lastAssistant?.message ?? {});
       const results = task.probes.map(probe => ({ ...probe,
         summaryOk: probe.mustContain ? compacted.summary.includes(probe.mustContain) : !compacted.summary.includes(probe.mustNotContain),
         resumeOk: probe.mustContain ? answer.includes(probe.mustContain) : !answer.includes(probe.mustNotContain),
       }));
       // Literal mention of a withdrawal is not resurrection. This is wiring, not a semantic score.
-      const passed = results.filter(p => p.mustContain).every(p => p.summaryOk && p.resumeOk) && errors.length === 0;
+      const diagnostic = isLong ? evaluateLongAnswer(cycle, answer) : null;
+      const passed = isLong ? diagnostic.passed && !probe.error && probe.stopReason === 'stop'
+        : results.filter(p => p.mustContain).every(p => p.summaryOk && p.resumeOk) && errors.length === 0;
       const takeovers = compacted.details?.generator === 'pi-session-blackboard' && compacted.details?.schema === 2 ? 1
         : compacted.fromHook ? (arm.id === 'board-prefix' ? 1 : null) : 0;
-      const evidence = { cycle, passed, compactionId: compacted.id, answerEntryId: lastAssistant?.id, answer, results, takeovers, summaryChars: compacted.summary.length };
+      const evidence = { cycle, passed, compactionId: compacted.id, answerEntryId: isLong ? probe.answerEntryId : lastAssistant?.id, answer, results, ...(isLong ? { probe, diagnostic } : {}), takeovers, summaryChars: compacted.summary.length };
       cycleResults.push(evidence);
       save(join(dir, 'cycles', String(cycle), 'resume.json'), evidence);
-      if (!passed) { failureKind = 'task-output'; throw new Error(`Cycle ${cycle}: required literal probes did not survive`); }
+      const probeRecords = isLong ? requests.filter(r => r.cycle === cycle && r.kind === 'probe') : [];
+      if (isLong && (probe.error || probe.stopReason !== 'stop' || probeRecords.length !== 1 || !probeRecords[0]?.completed || probeRecords[0]?.error)) { failureKind = 'probe-execution'; throw new Error(`Probe execution failed: ${probe.error ?? probe.stopReason}`); }
+      if (!passed && !isLong) { failureKind = 'task-output'; throw new Error(`Cycle ${cycle}: required literal probes did not survive`); }
       progress.completedCycles++; persist();
     }
-    const row = { arm: arm.id, status: 'passed', passed: true, completedRounds: progress.completedRounds,
+    const row = { arm: arm.id, status: isLong ? 'completed' : 'passed', passed: isLong ? cycleResults.every(c => c.passed) : true,
+      executionPassed: true, qualityPassed: cycleResults.every(c => c.passed), protocol: spec.protocol ?? 'wiring-smoke', toolErrors, completedRounds: progress.completedRounds,
       completedCycles: progress.completedCycles, cycles: cycleResults, compactions: cycleResults.length,
       takeovers: cycleResults.every(c => c.takeovers !== null) ? cycleResults.reduce((n, c) => n + c.takeovers, 0) : null,
       modelCalls: requests.length, summaryCalls: requests.filter(r => r.kind === 'summarizer').length, requests, toolTrail,
       summaryChars: cycleResults.reduce((n, c) => n + c.summaryChars, 0), results: cycleResults.at(-1).results,
       answer: cycleResults.at(-1).answer, wallMs: Date.now() - started,
       offlineNetworkCalls: spec.live ? null : fetchCalls, errors,
-      note: spec.live ? 'Manual-compaction wiring smoke only, not an effectiveness benchmark.' : 'Scripted notes, summaries and resumed answers: wiring only, not memory accuracy.' };
+      note: isLong ? 'Incremental synthetic long-state diagnostic; no public-benchmark or real-repository success claim.' : spec.live ? 'Manual-compaction wiring smoke only, not an effectiveness benchmark.' : 'Scripted notes, summaries and resumed answers: wiring only, not memory accuracy.' };
     save(join(dir, 'result.json'), row); progress.status = row.status; persist();
     return 0;
   } catch (error) {

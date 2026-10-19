@@ -2,8 +2,9 @@
 
 ## Status: 46/52 plan steps complete, release gate still open
 
-The current entry point is a **small wiring smoke**, not a public benchmark or a
-validated quality/cost comparison. The 2026-10-19 repair-and-retest run completed
+The default entry point is a **small wiring smoke**, not a public benchmark or a
+validated quality/cost comparison. A separately authorized 2026-10-20 05:00–11:00
+long-run entry is described below; its preparation does not complete step 47. The 2026-10-19 repair-and-retest run completed
 all three small cases; see [the full ledger](smoke-evidence-20261019.json), including
 all failed attempts (383.998 seconds cumulatively, 47 requests). Successful cases
 span repairs and are not a frozen-version performance comparison.
@@ -11,8 +12,9 @@ span repairs and are not a frozen-version performance comparison.
 The smoke exercises a real pi 1.3.0 session, extension loading, actual fixture-file
 writes, persisted **manual** compactions, and post-compaction continuations.
 The offline provider now exercises 2/4/8/16 actual compaction/resume cycles, not
-merely 16 user prompts. Live authorization remains limited to one cycle.
-Repeated automatic compaction and real-model 8/16-cycle quality remain unverified.
+merely 16 user prompts. The default smoke remains limited to one live cycle.
+The separate long-run authorization permits 2/4→8/16 manual cycles, but no long
+live results or repeated automatic-compaction release acceptance are claimed yet.
 
 **Earlier evaluation tables are withdrawn as comparative evidence.** The old
 harness had unequal tail budgets, an off-by-one round count, version-inappropriate
@@ -40,7 +42,8 @@ node eval/nightly.mjs --live --model strata/qwen3.8-flash-next-iq3_s --task path
 
 `npm run eval` and `eval/run.mjs` delegate to this same supervisor.
 `eval/nightly.cmd` is an optional foreground shim, also offline by default.
-There is **no scheduled job**. Legacy `eval/live-check.mjs` refuses to execute:
+The default smoke creates **no scheduled job**. The separately authorized one-shot
+long-run job is documented below. Legacy `eval/live-check.mjs` refuses to execute:
 it had no hard supervisor and one unconditional PASS.
 
 Environment variables do not enable live mode or enlarge the batch. Unknown
@@ -171,11 +174,55 @@ The fixture deliberately scripts notes, native summaries and the resumed answer.
 A green offline check proves wiring, **not a model's memory quality**. It must
 never be quoted as a public-benchmark score.
 
+## Authorized long-run window (preparation, not a result)
+
+`eval/overnight.mjs` requires a separate immutable authorization manifest. It does
+not enlarge the default smoke or grant standing live permission. The current user
+explicitly authorized 2026-10-20 **05:00–11:00 local (+08:00)**, a new fixed six-hour
+window separate from the retained 383.998-second historical ledger.
+
+- Step 47 only: native / pinned 0.2 / current 0.3, 2/4 then 8/16 persisted manual
+  compaction cycles. All arms must execute 2 and 4 before expansion. One agent
+  decision is required before proceeding to the next numbered plan step.
+- `long-state-v1` supplies initial facts once and only later changes: constraints,
+  exact paths, task status, hypothesis validity, permission revocation and next
+  action. The fixture is a controlled state-retention diagnostic, **not** a public
+  benchmark, real coding trajectory, or observation of a model's hidden reasoning.
+- After each cut, a fork gets one read-only, tool-free diagnostic request. The main
+  session file is hash-checked unchanged. Diagnostic questions/answers are never
+  copied back into the main trajectory. Gold state is used only by the verifier.
+- Normal wrong answers / invalid JSON with a successful response are quality
+  failures. Probe setup, transport, evidence-I/O and unclassified tool errors are
+  execution failures and stop before the next generation. Only enumerated note
+  validation mistakes can be corrected within the existing request/tool caps.
+- A failure pauses for agent inspection. Restarting does not clear pending reviews,
+  authorize retries, discard partial request counts or rerun passed cases. All
+  outstanding reviews must be decided before any new worker; unknown orphan exit
+  status requires explicit reconciliation and confirmation no worker remains.
+- A root `STOP` file stops new requests and aborts the active supervised process.
+  The controller also rejects new work outside the fixed deadline. This bounds the
+  client, not a guarantee that a remote GPU server cancelled disconnected work.
+
+`eval/schedule.ps1` registers a one-shot task using absolute `node.exe` and argv,
+not a `cmd /c` string. `eval/scheduled.mjs` logs and supervises that same controller.
+An actual scheduled **offline** launch passed all three two-cycle arms on this
+Windows host, including the project's ampersand path; the temporary proof task was
+removed. The authorized production task is `PiSessionBlackboardLong20261020`.
+See [preparation evidence](OVERNIGHT-20261020.md).
+
+Read-only monitoring: `node eval/watch.mjs --manifest <absolute-authorization.json>
+--seconds 90` or `--until-start`. Local raw artifacts remain under ignored result
+directories. A valid fingerprinted offline receipt is required before live work;
+a source/runtime change invalidates it. Mid-run repairs and retries retain their
+source versions and all attempts, and are not a frozen-version A/B result.
+
 ## Public benchmark gate (not run)
 
-- CompactBench: the local read-only checkout under `eval/vendor/cb` exposed only
-  `v0.1.0` as a public tag during the earlier audit. The plan's v0.2/scorer2
-  requirement remains unresolved. No adapter or eligible pinned run exists.
+- CompactBench: `eval/vendor/cb` source commit
+  `b2bb0e2254010e7842801b9101e56fd9a6542615` declares package v0.2.0 and scorer
+  2.0.0. The remote's only `v0.1.0` tag does not contradict the newer source.
+  Pinning this exact commit resolves the version question; an adapter and an
+  eligible actual run are still missing.
 - MemoryAgentBench and LongMemEval diagnostics are not integrated.
 - CompAct-Bench is a protocol reference until a complete runnable harness is
   verified, not an executable dependency inferred from its website.

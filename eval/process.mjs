@@ -1,6 +1,6 @@
 /** One process boundary for tests, preflight and live workers; never uses a shell. */
 import { spawn, spawnSync } from 'node:child_process';
-export async function supervise(command, args, { cwd, timeoutMs, onSpawn = () => {}, killTree } = {}) {
+export async function supervise(command, args, { cwd, timeoutMs, onSpawn = () => {}, killTree, signal: abortSignal } = {}) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('A positive process deadline is required');
   return new Promise(resolveResult => {
     const start = Date.now();
@@ -26,8 +26,11 @@ export async function supervise(command, args, { cwd, timeoutMs, onSpawn = () =>
     child.on('close', (code, signal) => {
       clearTimeout(timer);
       process.removeListener('SIGINT', interrupted); process.removeListener('SIGTERM', interrupted);
+      abortSignal?.removeEventListener('abort', interrupted);
       resolveResult({ command, args, cwd, code, signal, timedOut, stopped, launchError, setupError, wallMs: Date.now() - start, output });
     });
+    abortSignal?.addEventListener('abort', interrupted, { once: true });
+    if (abortSignal?.aborted) stop();
     // Install shutdown/error handlers BEFORE invoking caller code. A report-write exception
     // here used to reject the Promise while leaving a live child behind.
     try { onSpawn(child); }

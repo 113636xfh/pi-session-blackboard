@@ -15,7 +15,7 @@ export function fingerprint() {
       if (item.name === 'results' || item.name === 'vendor') continue;
       const path = join(dir, item.name);
       if (item.isDirectory()) visit(path);
-      else if (item.isFile() && /\.(?:mjs|js|ts|json|cmd)$/.test(item.name)) {
+      else if (item.isFile() && /\.(?:mjs|js|ts|json|cmd|ps1)$/.test(item.name)) {
         hash.update(relative(ROOT, path).replaceAll('\\', '/')); hash.update('\0'); hash.update(readFileSync(path)); hash.update('\0');
       }
     }
@@ -40,7 +40,7 @@ export async function ensurePreflight(requiredArms, { force = false } = {}) {
   try { previous = JSON.parse(readFileSync(path, 'utf8')); } catch { /* missing/corrupt/stale is not accepted */ }
   if (!force && receiptMatches(previous, current, requiredArms)) return { path, digest: current.digest, reused: true };
   console.log('PREFLIGHT: real-SDK offline acceptance, including 2/4/8/16 persisted compaction/resume cycles; no provider calls');
-  const execution = await supervise(process.execPath, ['--test', resolve(ROOT, 'test/eval.mjs')], { cwd: ROOT, timeoutMs: 600000 });
+  const execution = await supervise(process.execPath, ['--test', resolve(ROOT, 'test/eval.mjs'), resolve(ROOT, 'test/long-eval.mjs')], { cwd: ROOT, timeoutMs: 900000 });
   const testedArms = config.arms.filter(a => !a.extension || existsSync(resolve(ROOT, a.extension))).map(a => a.id);
   // Source changes during the test invalidate the receipt instead of blessing a mixed revision.
   const unchanged = fingerprint().digest === current.digest;
