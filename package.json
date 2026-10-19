@@ -53,6 +53,7 @@
     "test:all": "npm run typecheck && npm test && npm run test:known",
     "release:check": "npm run typecheck && npm test && npm run test:known && npm pack --dry-run",
     "test:eval": "node --test test/eval.mjs",
+    "eval:preflight": "node eval/preflight.mjs",
     "eval": "node eval/nightly.mjs"
   }
 }

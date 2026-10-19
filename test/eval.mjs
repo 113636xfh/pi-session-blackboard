@@ -1,12 +1,15 @@
 /** No live calls: same supervisor, loader, worker, compaction and persistence as the live smoke. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { ROOT, MODEL, config, parse, preflight, save, classify, sumKnown, systemPrompt, roundPrompt } from '../eval/protocol.mjs';
-import { supervise } from '../eval/nightly.mjs';
+import { supervise, main } from '../eval/nightly.mjs';
+import { readContinuation, resumeOptions } from '../eval/continuation.mjs';
+import { verifyCase } from '../eval/verify.mjs';
+import { receiptMatches } from '../eval/preflight.mjs';
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'sbb eval & paths '));
 const json = path => JSON.parse(readFileSync(path, 'utf8'));
 
@@ -21,6 +24,9 @@ test('live is explicit, unknown arguments fail closed, small-batch ceiling and e
   assert.throws(() => parse(['--task', 'typo']), /Unknown task/);
   assert.throws(() => parse(['--arm', 'typo']), /Unknown/);
   assert.throws(() => parse(['--rounds', 'NaN']), /Invalid/);
+  assert.throws(() => parse(['--live', '--model', MODEL, '--cycles', '2']), /ceiling/);
+  assert.equal(parse(['--cycles', '16']).maxRequests, 320);
+  assert.throws(() => parse(['--cycles', '3']), /Supported cycles/);
   assert(!systemPrompt(config.arms[0]).includes('blackboard'));
   assert(!systemPrompt(config.arms[1]).includes('action=review'));
   assert(systemPrompt(config.arms[2]).includes('Entry objects must contain only section and text'));
@@ -49,6 +55,17 @@ test('failed, missing and interrupted evidence is not success; unknown counts st
   assert.equal(classify({ status: 'passed', passed: true }, 1, null, false), 'error');
   assert.equal(classify({ status: 'passed', passed: true }, 0, null, true), 'timeout');
   assert.equal(sumKnown([{ modelCalls: null }], 'modelCalls'), null);
+});
+
+test('preflight receipts reject stale code/runtime, incomplete coverage and failed executions', () => {
+  const current = { digest: 'current', env: { node: process.version } };
+  const receipt = { schema: 1, passed: true, offlineOnly: true, ...current, testedArms: ['native', 'board-fixed'], execution: { code: 0, timedOut: false } };
+  assert(receiptMatches(receipt, current, ['native']));
+  assert(!receiptMatches(receipt, current, ['board-prefix']));
+  assert(!receiptMatches(receipt, { ...current, digest: 'changed' }, ['native']));
+  assert(!receiptMatches(receipt, { ...current, env: { node: 'other' } }, ['native']));
+  assert(!receiptMatches({ ...receipt, execution: { code: 1, timedOut: false } }, current, ['native']));
+  assert(!receiptMatches({ ...receipt, offlineOnly: false }, current, ['native']));
 });
 
 test('Windows batch launcher from unrelated cwd safely quotes ampersand path', { skip: process.platform !== 'win32' }, () => {
@@ -81,6 +98,20 @@ test('spawn errors and hung children are bounded and leave no running process', 
   assert.throws(() => process.kill(pid, 0), /ESRCH/);
 });
 
+test('caller callback failures and tree-kill failures cannot orphan the child', { timeout: 10000 }, async () => {
+  let callbackPid, fallbackPid;
+  const setup = await supervise(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {
+    cwd: fixtureRoot, timeoutMs: 3000, onSpawn: child => { callbackPid = child.pid; throw new Error('injected report write failure'); },
+  });
+  assert.match(setup.setupError, /report write failure/);
+  assert.throws(() => process.kill(callbackPid, 0), /ESRCH/);
+  const fallback = await supervise(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {
+    cwd: fixtureRoot, timeoutMs: 250, onSpawn: child => { fallbackPid = child.pid; }, killTree: () => { throw new Error('injected taskkill failure'); },
+  });
+  assert(fallback.timedOut);
+  assert.throws(() => process.kill(fallbackPid, 0), /ESRCH/);
+});
+
 test('three-arm full offline chain from unrelated cwd, paths with spaces and ampersand', { timeout: 90000 }, async t => {
   const available = config.arms.filter(arm => !arm.extension || existsSync(resolve(ROOT, arm.extension)));
   if (available.length !== 3) t.diagnostic('Old git worktree is optional in CI; test all locally available arms.');
@@ -94,6 +125,8 @@ test('three-arm full offline chain from unrelated cwd, paths with spaces and amp
   assert.equal(report.rows.length, available.length);
   for (const row of report.rows) {
     assert.equal(row.completedRounds, 2);
+    assert.equal(row.completedCycles, 1);
+    assert.equal(row.verification.passed, true);
     assert.equal(row.execution.command, process.execPath);
     assert.equal(row.execution.args[0], resolve(ROOT, 'eval/run.mjs'));
     assert.equal(row.offlineNetworkCalls, 0);
@@ -109,6 +142,19 @@ test('three-arm full offline chain from unrelated cwd, paths with spaces and amp
     assert(existsSync(join(out, row.arm, 'project/fixture/step-2.txt')));
     assert(!existsSync(join(out, row.arm, 'project/fixture/step-3.txt')));
   }
+  // A worker PASS is insufficient: independently validate real files and session nodes.
+  const nativeDir = join(out, 'native'), spec = json(join(nativeDir, 'spec.json'));
+  const original = json(join(nativeDir, 'result.json'));
+  assert(verifyCase(spec, original).passed);
+  assert(!verifyCase(spec, { ...original, completedRounds: 99 }).passed);
+  const fixture = join(nativeDir, 'project/fixture/step-2.txt'), savedFixture = readFileSync(fixture, 'utf8');
+  writeFileSync(fixture, 'tampered');
+  assert(!verifyCase(spec, original).passed, 'script-generated false green cannot hide wrong output');
+  writeFileSync(fixture, savedFixture);
+  const compactPath = join(nativeDir, 'cycles/1/compaction.json'), savedCompact = readFileSync(compactPath, 'utf8');
+  save(compactPath, { ...JSON.parse(savedCompact), summary: 'fabricated summary' });
+  assert(!verifyCase(spec, original).passed, 'detached artifact is not persisted compaction evidence');
+  writeFileSync(compactPath, savedCompact);
   // Never overwrite a previous run or let stale artifacts turn a failed rerun green.
   const reused = await supervise(process.execPath, [resolve(ROOT, 'eval/nightly.mjs'), '--out', out], { cwd: fixtureRoot, timeoutMs: 5000 });
   assert.notEqual(reused.code, 0);
@@ -125,6 +171,53 @@ test('first worker request-limit failure stops the matrix before another arm sta
   assert.equal(report.rows.length, 1);
   assert.equal(report.rows[0].modelCalls, 1);
   assert(!existsSync(join(out, 'board-prefix')));
+});
+
+for (const [index, cycles] of [2, 4, 8, 16].entries()) {
+  test(`offline ${cycles} REAL persisted compaction/resume cycles across arms`, { timeout: 590000 }, async () => {
+    const available = config.arms.filter(a => !a.extension || existsSync(resolve(ROOT, a.extension)));
+    const out = join(fixtureRoot, `cycles-${cycles}`), caseSeconds = Math.max(30, cycles * 10), totalSeconds = caseSeconds * available.length + 5;
+    const execution = await supervise(process.execPath, [resolve(ROOT, 'eval/nightly.mjs'), '--arm', available.map(a => a.id).join(','),
+      '--cycles', String(cycles), '--task', config.tasks[index].id, '--case-seconds', String(caseSeconds), '--total-seconds', String(totalSeconds), '--out', out], { cwd: fixtureRoot, timeoutMs: (totalSeconds + 5) * 1000 });
+    assert.equal(execution.code, 0, execution.output);
+    const report = json(join(out, 'report.json'));
+    assert.equal(report.rows.length, available.length);
+    for (const row of report.rows) {
+      assert.equal(row.completedCycles, cycles);
+      assert.equal(row.compactions, cycles);
+      assert.equal(row.completedRounds, cycles * 2);
+      assert.equal(row.verification.passed, true);
+      assert.equal(row.offlineNetworkCalls, 0);
+      assert.equal(new Set(row.cycles.map(c => c.compactionId)).size, cycles);
+      assert(row.requests.every(r => r.completed));
+    }
+  });
+}
+
+test('continuation reruns only failed groups, rechecks successes and charges every attempt', { timeout: 60000 }, async () => {
+  const out = join(fixtureRoot, 'continuation-first'), next = join(fixtureRoot, 'continuation-second');
+  const available = config.arms.filter(a => !a.extension || existsSync(resolve(ROOT, a.extension)));
+  const first = await main(['--arm', available.map(a => a.id).join(','), '--out', out, '--case-seconds', '25', '--total-seconds', '80'], {
+    execute: (command, args, options) => args.at(-1).includes('board-fixed')
+      ? Promise.resolve({ code: 1, signal: null, timedOut: false, launchError: 'injected worker startup failure', wallMs: 0, output: '' })
+      : supervise(command, args, options),
+  });
+  assert.equal(first, 1);
+  const previousPath = join(out, 'report.json'), before = readFileSync(previousPath, 'utf8');
+  const history = readContinuation(previousPath);
+  assert(history.spentMs > 0);
+  const second = await main(['--resume', previousPath, '--out', next]);
+  assert.equal(second, 0);
+  const report = json(join(next, 'report.json'));
+  assert.equal(report.rows.filter(r => !r.reusedFrom).length, 1);
+  assert.equal(report.rows.at(-1).arm, 'board-fixed');
+  assert(report.cumulativeWallMs >= history.spentMs + report.wallMs);
+  assert.equal(readFileSync(previousPath, 'utf8'), before, 'failed history remains immutable');
+  const liveHistory = { ...history, report: { ...history.report, options: { ...history.report.options, live: true, model: MODEL } } };
+  assert.throws(() => resumeOptions(parse([]), ['--resume', previousPath], liveHistory), /explicit/);
+  assert.throws(() => resumeOptions(parse([]), ['--task', 'hypothesis'], history), /cannot change/);
+  const unfinished = join(fixtureRoot, 'unfinished-report.json'); save(unfinished, { ...history.report, finalized: false });
+  assert.throws(() => readContinuation(unfinished), /finalized/);
 });
 
 for (const fault of ['tool-loop', 'model-error', 'extra-write', 'hang']) {

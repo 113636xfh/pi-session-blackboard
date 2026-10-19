@@ -9,9 +9,10 @@ all failed attempts (383.998 seconds cumulatively, 47 requests). Successful case
 span repairs and are not a frozen-version performance comparison.
 
 The smoke exercises a real pi 1.3.0 session, extension loading, actual fixture-file
-writes, one persisted **manual** compaction, and a post-compaction continuation.
-It does not verify repeated automatic compaction,
-8/16 compaction cycles, or the remaining release gates.
+writes, persisted **manual** compactions, and post-compaction continuations.
+The offline provider now exercises 2/4/8/16 actual compaction/resume cycles, not
+merely 16 user prompts. Live authorization remains limited to one cycle.
+Repeated automatic compaction and real-model 8/16-cycle quality remain unverified.
 
 **Earlier evaluation tables are withdrawn as comparative evidence.** The old
 harness had unequal tail budgets, an off-by-one round count, version-inappropriate
@@ -26,6 +27,9 @@ artifacts, not evidence of relative performance. See [AUDIT.md](AUDIT.md).
 # The old arm requires the clean local .eval-prefix worktree; otherwise specify arms.
 node eval/nightly.mjs
 node eval/nightly.mjs --arm native,board-fixed
+
+# Offline long-chain wiring only; does not enable 16-cycle live work.
+node eval/nightly.mjs --arm native,board-fixed --cycles 16
 
 # Prints the actual launch plan; no worker/model request is started.
 node eval/nightly.mjs --dry-run
@@ -49,6 +53,24 @@ inspect/fix/test offline. When the user authorizes repair-and-retest, resume onl
 the failed arm and carry forward **all elapsed live time** against the same
 cumulative cap. Otherwise obtain permission. Do not reset the budget, drop failed
 attempts or rerun already-completed arms just to obtain a green matrix.
+
+Finalized schema-3 reports support case-level continuation:
+
+```sh
+# Offline: failed groups rerun; successful groups are independently reverified.
+node eval/nightly.mjs --resume /absolute/path/to/report.json
+# Live continuation still needs explicit current authorization and the same model.
+node eval/nightly.mjs --resume /absolute/path/to/report.json --live --model strata/qwen3.8-flash-next-iq3_s
+```
+
+The ancestor reports are immutable and hash-linked; every failed attempt consumes
+the original cumulative time budget. Task, arms, model, cycles and total budget
+cannot change on continuation. Successful cases are reused only if their effective
+protocol/source signature and persisted evidence still verify. Changed or corrupt
+cases are rerun, with the rejection reason retained. A repair may span revisions;
+that is **not** a frozen-revision A/B comparison. Interrupted/unfinalized reports
+require inspecting the worker and reconciling budget usage first; the entry point
+will not silently assume that an orphan or remote request has stopped.
 
 ## What is fixed across arms
 
@@ -94,7 +116,14 @@ truncating the previous evidence. Outputs include:
 - per case: model descriptor (no credentials), resolved settings/tools,
   progress, request starts/completions/usage, tool trail and final result;
 - synthetic project artifacts, actual pi session JSONL and persisted compaction
-  node, including the summary; post-compaction model answer.
+  nodes, including each summary; `cycles/<n>/compaction.json` and `resume.json`.
+
+A worker's PASS is not sufficient. The parent separately checks actual files,
+successful persisted write-tool results in each cycle, the active session branch,
+unique persisted compaction IDs, cut points, cycle ordering, resumed message IDs,
+required literal probes, budgets, tools and completed request records. Detached
+or tampered summary artifacts cannot turn a failed worker into a passing case.
+Unknown/unclassified runtime failures stay distinct from a proven design fault.
 
 Failures, truncation, tool errors, over-budget requests, missing artifacts and
 missing compaction nodes are never a PASS or a harmless skip. Unknown metrics
@@ -106,7 +135,8 @@ mean a free GPU run. No private source sessions are used.
 ## Offline acceptance before any live run
 
 ```sh
-npm run test:eval
+npm run eval:preflight     # bounded offline acceptance + fingerprinted receipt
+npm run test:eval          # run the harness suite directly, without a receipt
 npm run release:check
 ```
 
@@ -118,7 +148,24 @@ files, compaction and resume. It injects unbounded tools, failed model responses
 a non-cooperative stream, an unsolicited notes-file write and request-budget
 exhaustion. These must fail, stop or time out without spending GPU time. It also
 tests the Windows `.cmd` shim, spawn failure, stale output rejection and atomic
-artifact replacement.
+artifact replacement. Additional coverage includes caller callback exceptions,
+failed tree termination with PID-specific fallback, artifact tampering, shared-budget
+continuation and the available arms at 2/4/8/16 persisted compaction/resume cycles
+(distributed across the four synthetic tasks, not a full task×cycle cross product).
+
+**Live entry is blocked until this offline suite passes.** A receipt binds the
+source/test/protocol files, installed SDK code, lockfile, Node/platform and available
+arms. A code/runtime change invalidates it. The gate has its own bounded CPU-only
+process and forbids provider network calls; failed gate time is not represented as
+GPU use. Receipts are local acceptance artifacts, not cryptographic attestations
+against a workspace owner who can edit the code or receipts.
+
+Long-chain testing found that rebuilding the event projection from scratch at every
+hook repeatedly cloned all accumulated state. The replacement keeps only a
+discardable incremental derivation: every relevant event-prefix fingerprint is
+rechecked, forks/rewinds/mutations rebuild it, and returned data is cloned. The
+journal, source checks, receipts, summaries and compaction semantics are unchanged;
+this is not the token-reduction work deferred until correctness is established.
 
 The fixture deliberately scripts notes, native summaries and the resumed answer.
 A green offline check proves wiring, **not a model's memory quality**. It must

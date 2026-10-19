@@ -148,4 +148,41 @@ version-check rejection behaviour remains covered.
 The successful cases span repairs, so the table is **not a frozen-version A/B
 performance comparison**. It also contains one manual compaction per case, not
 2/4 compaction cycles. Plan steps 47–52 and repeated-auto-compaction release gates
-remain open. No 4/8/16-cycle expansion, schedule or deployment was started.
+remain open. No live 4/8/16-cycle expansion, schedule or deployment was started.
+
+## Offline long-chain gate and the actual projection bottleneck — 2026-10-20
+
+The user's next requirement was a reliable test chain: infrastructure bugs must
+be repaired and resumed, not treated as a final design verdict. No additional
+live calls were authorized or made in this phase.
+
+- Added actual 2/4/8/16 manual compaction/resume cycles to the real-SDK offline
+  path. The model stream remains scripted, so these test plumbing, not quality.
+- The new arm reached only 11 cycles at 75 seconds and 14 at 240 seconds. These
+  failed artifacts remain in the original offline test directory and in
+  `smoke-2026-10-19T17-12-56-560Z-2340` (see the evidence ledger for exact paths);
+  the failure was not relabelled as a model issue.
+- A four-cycle CPU profile measured 4.721 s in `structuredClone`, 1.891 s in
+  canonical event encoding and 1.264 s in the reducer itself. Per-cycle scripted
+  provider work was only about 40 ms. Replaying every prior event, with repeated
+  complete projection cloning at every hook/append, was a real design bottleneck.
+- Replaced repeated full replay in the runtime with a disposable incremental
+  projection. Complete relevant-prefix fingerprints are checked every read;
+  forks, rewinds and event mutations rebuild it. Returned values cannot mutate
+  the private cache. Pure full replay stays available as the reference oracle.
+  No checkpoint/receipt/summary truncation or gate relaxation was used.
+- After the patch, the standalone new arm persisted and independently verified
+  **16 cycles / 32 fixture writes / 176 scripted requests in 68.3 seconds**
+  (`smoke-2026-10-19T17-22-48-258Z-50788`). This is a local wiring measurement,
+  not a frozen-environment performance benchmark or live-model quality result.
+- The parent now verifies persisted session branch, cycle ordering, fixture
+  writes, compaction cut points and resumed message IDs rather than trusting
+  worker PASS. Callback exceptions/tree-kill failures are injected offline.
+- Live entry now requires a current code/runtime-bound offline acceptance
+  receipt. Schema-3 continuation hash-links finalized reports, charges all
+  prior elapsed attempts, and revalidates successful groups before reuse.
+  It does not auto-retry live errors or authorize a larger batch.
+
+The final offline gate/release result and exact failed artifact paths are recorded
+in [OFFLINE-GATE-20261020.md](OFFLINE-GATE-20261020.md). Real-model 2/4/8/16, repeated automatic
+compaction, public benchmark adapters and deployment remain unclaimed.

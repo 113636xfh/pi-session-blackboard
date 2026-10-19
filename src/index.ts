@@ -14,7 +14,7 @@ import { boardPath } from './paths.js';
 import { inspectLegacy, migrateLegacy } from './migration.js';
 import { renderSnapshot, exportMarkdown, exportOptions } from './export.js';
 import { resolve } from 'node:path';
-import { replayBranch, toBoard, planCommit, newEvent, fingerprint, reduceEvent, nativeRequestFresh, type CommitInput } from './journal.js';
+import { BranchProjector, replayBranch, toBoard, planCommit, newEvent, fingerprint, reduceEvent, nativeRequestFresh, type CommitInput } from './journal.js';
 import { commitWithCache, WriterLocks } from './storage.js';
 import { makeOffer, validateReview, validateSources, draftCandidates, sourceRefs, checkReadiness, repairHeadroom } from './coverage.js';
 import { searchPage, readLegacyArchives, buildIndex } from './retrieval.js';
@@ -32,19 +32,20 @@ type Ctx = any;
 const OWN_TOOLS = ['blackboard', 'blackboard_recall'];
 export default function sessionBlackboard(pi: ExtensionAPI) {
   const locks = new WriterLocks();
+  const projector = new BranchProjector();
   const get = (ctx: Ctx) => {
     const manager = ctx.sessionManager;
     if (!manager?.getBranch || !manager?.getSessionId) throw new Error('Session manager unavailable');
     const cwd = ctx.cwd ?? manager.getCwd?.() ?? process.cwd();
     const cfg = loadConfig(cwd);
     const branch = manager.getBranch() as BranchEntry[];
-    return { cfg, branch, manager, sessionId: manager.getSessionId(), projection: replayBranch(branch) };
+    return { cfg, branch, manager, sessionId: manager.getSessionId(), projection: projector.read(branch) };
   };
   const commit = (ctx: Ctx, event: ReturnType<typeof newEvent>) => {
     const s = get(ctx);
     if (!s.cfg.enabled) throw new Error('Blackboard disabled; no state changed');
     locks.acquire(s.cfg.boardDir, s.sessionId);
-    return commitWithCache(pi, s.manager, event);
+    return commitWithCache(pi, s.manager, event, undefined, projector);
   };
   const change = (ctx: Ctx, changes: JournalChange[], operationId?: string) => commit(ctx, newEvent(get(ctx).projection, changes, operationId));
   const notify = (ctx: Ctx, text: string, kind = 'info') => ctx.ui?.notify?.(text, kind);

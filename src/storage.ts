@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { hostname } from 'node:os';
 import { safeSid } from './paths.js';
 import type { JournalProjection } from './types.js';
-import { appendTransaction, type JournalAccess, type JournalAppender } from './journal.js';
+import { appendTransaction, type JournalAccess, type JournalAppender, type ProjectionReader } from './journal.js';
 import type { JournalEvent } from './types.js';
 
 export function atomicWrite(path: string, text: string): void {
@@ -31,8 +31,8 @@ export function atomicWrite(path: string, text: string): void {
 export function writeProjectionCache(path: string, projection: JournalProjection, branchKey: string): void {
   atomicWrite(path, JSON.stringify({ schema: 2, branchKey, projection }));
 }
-export function commitWithCache(pi: JournalAppender, manager: JournalAccess, event: JournalEvent, cache?: { path: string; branchKey: string }) {
-  const result = appendTransaction(pi, manager, event);
+export function commitWithCache(pi: JournalAppender, manager: JournalAccess, event: JournalEvent, cache?: { path: string; branchKey: string }, reader?: ProjectionReader) {
+  const result = appendTransaction(pi, manager, event, reader);
   if (cache) try { writeProjectionCache(cache.path, result.projection, cache.branchKey); }
   catch (error) { return { ...result, warning: `Committed; cache pending rebuild (${error instanceof Error ? error.message : String(error)}). Do not resubmit.` }; }
   return result;

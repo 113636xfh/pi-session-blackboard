@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { selectSummary } from '../build/summary.js';
-import { emptyProjection, reduceEvent, replayEvents, toBoard, fingerprint, planCommit, appendTransaction, JOURNAL_TYPE, consumeCompaction, replayBranch } from '../build/journal.js';
+import { emptyProjection, reduceEvent, replayEvents, toBoard, fingerprint, planCommit, appendTransaction, JOURNAL_TYPE, consumeCompaction, replayBranch, BranchProjector } from '../build/journal.js';
 export const entry = (id = 'm-1', text = 'Review only; not approved for changes') => ({
   id, revision: 1, section: 'goal', text, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
   order: 1, validity: 'active', epistemic: 'stated', origin: 'user', sources: [], archived: false,
@@ -9,6 +9,35 @@ export const entry = (id = 'm-1', text = 'Review only; not approved for changes'
 export const event = (changes, baseRevision = 0, id = `e-${baseRevision}`) => ({
   schema: 2, eventId: id, operationId: id, at: '2026-01-01T00:00:00Z', baseRevision, changes,
 });
+test('incremental projection is full-replay equivalent and does not re-reduce old events', () => {
+  const reader = new BranchProjector(), branch = [], manager = { getBranch: () => branch, getLeafId: () => branch.at(-1)?.id ?? null };
+  const pi = { appendEntry(customType, data) { branch.push({ type: 'custom', customType, data, id: `node-${branch.length}`, parentId: manager.getLeafId() }); } };
+  for (let i = 0; i < 32; i++) {
+    const inputs = [{ section: 'findings', text: `Measured fixture ${i}; not verified`, retain: i % 4 === 0 }];
+    appendTransaction(pi, manager, planCommit(reader.read(branch), inputs, `increment-${i}`), reader);
+    if (i % 4 === 3) branch.push({ type: 'compaction', id: `cut-${i}`, parentId: manager.getLeafId() });
+    assert.deepEqual(reader.read(branch), replayBranch(branch));
+  }
+  assert.equal(reader.stats.eventsApplied, 40, '32 events + 8 persisted cuts, each applied once');
+  const returned = reader.read(branch); returned.entries[Object.keys(returned.entries)[0]].text = 'poisoned'; returned.history.length = 0;
+  assert.deepEqual(reader.read(branch), replayBranch(branch), 'returned data cannot mutate the private derivation');
+});
+
+test('incremental projection rebuilds on rewind, fork and in-place event mutation', () => {
+  const reader = new BranchProjector();
+  const a = { type: 'custom', customType: JOURNAL_TYPE, id: 'a', parentId: null, data: event([{ type: 'put', entry: entry(), expectedRevision: 0 }]) };
+  const b = { type: 'custom', customType: JOURNAL_TYPE, id: 'b', parentId: 'a', data: event([{ type: 'put', entry: entry('m-2', 'Branch B'), expectedRevision: 0 }], 1, 'branch-b') };
+  const c = { type: 'custom', customType: JOURNAL_TYPE, id: 'c', parentId: 'a', data: event([{ type: 'put', entry: entry('m-3', 'Branch C'), expectedRevision: 0 }], 1, 'branch-c') };
+  assert.deepEqual(reader.read([a, b]), replayBranch([a, b]));
+  assert.deepEqual(reader.read([a]), replayBranch([a]));
+  assert.deepEqual(reader.read([a, c]), replayBranch([a, c]));
+  const changed = structuredClone(a); changed.data.changes[0].entry.text = 'Changed journal content with same IDs';
+  assert.deepEqual(reader.read([changed, c]), replayBranch([changed, c]));
+  const malformed = { ...c, data: { ...c.data, baseRevision: 999 } };
+  assert.throws(() => reader.read([changed, malformed]), /stale/);
+  assert.deepEqual(reader.read([changed, c]), replayBranch([changed, c]), 'failed suffix never blesses an invalid cache');
+});
+
 test('pure reducer replays identical events to identical projections without mutating inputs', () => {
   const initial = emptyProjection(), first = event([{ type: 'put', entry: entry(), expectedRevision: 0 }]);
   const before = JSON.stringify(initial), input = JSON.stringify(first);

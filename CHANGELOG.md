@@ -8,6 +8,19 @@ Breaking. The storage model changed from a Markdown board to branch-local sessio
 events, and compaction takeover is now gated on proven coverage. Read the
 migration section in [README.md](README.md#migrating-from-02).
 
+### Candidate validation follow-up — 2026-10-20
+- Replace repeated full event replay in runtime hooks with a disposable incremental
+  projection. Complete relevant-prefix fingerprints detect event mutation, forks
+  and rewinds; private cached state is never returned by reference.
+- Add a mandatory fingerprinted offline acceptance gate before live smoke work,
+  independent parent verification of persisted case evidence, and case-level
+  continuation that preserves failed attempts and the cumulative time budget.
+- Exercise real-SDK 2/4/8/16 manual compaction/resume cycles with a scripted offline
+  provider. This is wiring evidence, not model quality, a public benchmark or a
+  completed release gate; live multi-cycle expansion remains unauthorized.
+- Full release check: 54 original smoke checks; 109 node tests (108 pass, one
+  platform skip); 3 known-failure regressions; typecheck and package dry-run pass.
+
 ### Added
 - **Session events are authoritative** (`sbb-event`): append-only, branch-local,
   invisible to the model. `/tree`, fork, clone and reset inherit real ancestry;

@@ -185,8 +185,9 @@ export function planCommit(projection: JournalProjection, inputs: CommitInput[],
 export type JournalAccess = { getBranch(): BranchEntry[]; getLeafId?(): string | null };
 export type JournalAppender = { appendEntry(customType: string, data: unknown): void };
 /** Synchronous public append/read-back is the critical section; no await can interleave it. */
-export function appendTransaction(pi: JournalAppender, manager: JournalAccess, event: JournalEvent): { projection: JournalProjection; alreadyCommitted: boolean; warning?: string } {
-  const before = manager.getBranch(), projection = replayBranch(before);
+export function appendTransaction(pi: JournalAppender, manager: JournalAccess, event: JournalEvent, reader?: ProjectionReader): { projection: JournalProjection; alreadyCommitted: boolean; warning?: string } {
+  const read = (branch: BranchEntry[]) => reader ? reader.read(branch) : replayBranch(branch);
+  const before = manager.getBranch(), projection = read(before);
   const expected = reduceEvent(projection, event);
   if (expected === projection) return { projection, alreadyCommitted: true };
   const leaf = before.at(-1)?.id ?? null;
@@ -196,7 +197,7 @@ export function appendTransaction(pi: JournalAppender, manager: JournalAccess, e
   const confirmed = after.find(entry => entry.type === 'custom' && entry.customType === JOURNAL_TYPE && (entry.data as JournalEvent)?.eventId === event.eventId);
   assert(confirmed && canonical(confirmed.data) === canonical(event), `append not confirmed${failure instanceof Error ? `: ${failure.message}` : ''}`);
   assert(confirmed!.parentId === leaf, 'unexpected branch/leaf changed during append; stop takeover');
-  const actual = replayBranch(after);
+  const actual = read(after);
   assert(actual.operations[event.operationId] === expected.operations[event.operationId], 'confirmed event cannot be replayed');
   return { projection: actual, alreadyCommitted: false, ...(failure ? { warning: 'Append reported an error, but the event was confirmed committed; do not repeat it.' } : {}) };
 }
@@ -218,6 +219,32 @@ export function nativeRequestFresh(projection: JournalProjection): boolean {
   if (!request) return false;
   const at = Date.parse(request.at);
   return Number.isFinite(at) && Date.now() - at <= request.ttlMs;
+}
+export interface ProjectionReader { read(branch: BranchEntry[]): JournalProjection }
+/** Disposable derivation, never authority. Validate ALL relevant prefix contents on every read;
+ * rebuild on forks/rewinds/mutation, and clone returns so callers cannot poison the next read.
+ * Message projections are intentionally not cached: coverage/source checks still reread them. */
+export class BranchProjector implements ProjectionReader {
+  private keys: string[] = [];
+  private projection = emptyProjection();
+  readonly stats = { eventsApplied: 0, fullRebuilds: 0, cacheHits: 0 };
+  read(branch: BranchEntry[]): JournalProjection {
+    const relevant = branch.filter(entry => (entry.type === 'custom' && entry.customType === JOURNAL_TYPE) || (entry.type === 'compaction' && entry.id));
+    const keys = relevant.map(entry => fingerprint({ type: entry.type, id: entry.id, parentId: entry.parentId,
+      ...(entry.type === 'custom' ? { data: entry.data } : {}) }));
+    const extendsPrefix = keys.length >= this.keys.length && this.keys.every((key, i) => key === keys[i]);
+    if (extendsPrefix && keys.length === this.keys.length) { this.stats.cacheHits++; return structuredClone(this.projection); }
+    let projection = extendsPrefix ? structuredClone(this.projection) : emptyProjection();
+    if (!extendsPrefix) this.stats.fullRebuilds++;
+    let applied = 0;
+    for (const entry of relevant.slice(extendsPrefix ? this.keys.length : 0)) {
+      projection = entry.type === 'custom' ? reduceEvent(projection, entry.data as JournalEvent) : consumeCompaction(projection, entry.id!);
+      applied++;
+    }
+    // Install only after the complete suffix has validated; exceptions preserve the old cache.
+    this.keys = keys; this.projection = structuredClone(projection); this.stats.eventsApplied += applied;
+    return projection;
+  }
 }
 export function replayBranch(branch: BranchEntry[]): JournalProjection {
   let projection = emptyProjection();
