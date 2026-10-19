@@ -21,3 +21,5 @@ eval/results/*.json
 .eval-prefix
 eval/vendor/
 eval/results/*.log
+eval/results/smoke-*/
+eval/results/live-smoke.lock

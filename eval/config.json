@@ -1,12 +1,16 @@
 {
-  "schema": 1,
-  "description": "Synthetic multi-round compaction evaluation. Tasks are invented here; no private session data is used or uploaded.",
+  "schema": 2,
+  "description": "Synthetic wiring-smoke tasks, not scored benchmarks. One manual compaction plus resume; exactly the requested user rounds. No private session data is used or uploaded.",
   "loop": { "rounds": [2, 4], "laterRounds": [8, 16] },
   "fixed": {
-    "model": "in-process-fixed-stream (free) or one pinned provider model for a paid run",
-    "tools": ["write", "blackboard"],
-    "tailBudget": "pi default keepRecentTokens, unchanged",
-    "remainingActions": 2,
+    "model": "in-process-fixed-stream (offline) or explicitly authorized strata/qwen3.8-flash-next-iq3_s",
+    "tools": { "common": ["write"], "notesArmsOnly": ["blackboard", "blackboard_recall"] },
+    "tailBudget": 800,
+    "reserveTokens": 4096,
+    "automaticCompaction": false,
+    "compactionStages": 1,
+    "resumeStages": 1,
+    "maxOutputTokens": 512,
     "temperature": 0
   },
   "arms": [
@@ -62,10 +66,8 @@
   ],
   "budget": {
     "authorizedCapCNY": 10,
-    "note": "The deterministic in-process arm costs 0. A paid arm must fit inside the existing DeepSeek cap; nothing here spends it by default.",
-    "estimate": {
-      "assumption": "4 tasks × 2 arms × (4 rounds + 1 compaction) ≈ 40 requests/round-set; at ~2.5k input + 400 output tokens per request on deepseek-chat list pricing this is well under ¥1 per round-set",
-      "mustRecheck": "re-read current provider pricing and per-request token counts before spending; abort if the projected total exceeds the cap"
-    }
+    "note": "Existing monetary cap is not authorization for GPU time. Offline by default; explicit per-batch user approval is required. Old request/cost estimates were invalidated by real tool loops.",
+    "liveSmokeCeiling": { "totalSeconds": 600, "caseSeconds": 200, "rounds": 2, "maxToolsPerPhase": 6, "maxRequestsPerCase": 20 },
+    "accounting": "Observe request starts/completions and reported usage, retain unknowns as null. Local GPU wall time is not free just because configured monetary prices are zero."
   }
 }

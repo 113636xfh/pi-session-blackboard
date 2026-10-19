@@ -8,9 +8,10 @@ npm test
 npm run test:known
 ```
 
-- `npm test`: existing 54-check smoke suite, 17 reliability regressions, and 2 real-SDK contract tests. No paid model requests.
+- `npm test`: the 54-check smoke suite plus reliability, journal, import, runtime, storage/platform, real-SDK and offline evaluation regressions. No paid model requests.
 - `npm run test:sdk`: build and run just the real-SDK contract tests.
-- `npm run test:known`: **three expected failing TODOs**, not three passing tests. They reproduce cross-branch contamination (S2/S3), lost native progress state (S4), and an unreachable old fact after 55 archives (S5). Node's TODO runner exits successfully while printing the assertion failures; this is deliberately not a release gate or an all-green claim. Remove each TODO only when its assigned stage implements and verifies the contract.
+- `npm run test:known`: three historical failure regressions, now passing with no TODO markers: cross-branch contamination, native progress state and retrieval beyond 55 archives.
+- `npm run test:eval`: eleven offline acceptance checks for the exact evaluation entry/supervisor/worker chain, including Windows quoting, three-arm compaction/resume, hard deadlines, uncooperative models, extra writes, request/tool limits and fail-fast reporting. The old baseline is exercised when its local worktree is present; CI must not download it implicitly. See `eval/AUDIT.md` and `eval/README.md`.
 
 ## What the SDK contract actually checks
 
@@ -27,6 +28,6 @@ Verified contracts:
 5. Persistent reopen preserves the custom event data.
 6. `getEntries()` includes abandoned branches while `getBranch()` does not. `context_edit` changes projected content without changing the original message's ID or raw stored content.
 
-These tests establish the SDK contracts needed for S2/S3. They **do not** yet validate the production v2 reducer, cut-point coverage, urgent-memory scheduling, or successful manual/automatic compaction end to end. Those remain subsequent implementation/release gates. Current local execution is on Windows; minimum-version and Linux/Windows CI runs remain S6 work.
+These SDK tests establish runtime contracts; the separate journal/runtime/fault suites exercise the implemented v2 reducer, cut-point coverage and bounded urgent-memory scheduling. The evaluation suite checks a scripted manual-compaction/resume chain, **not** real-model quality or repeated automatic compaction. Real-session release gates and plan steps 47–52 remain open. Local verification is on Windows; the repository includes the Node/Linux/Windows CI matrix, which is not proof that remote CI has run.
 
 All fixture content is synthetic. Local historical session statistics are background risk evidence, not an A/B success score, and raw private sessions are not included here.

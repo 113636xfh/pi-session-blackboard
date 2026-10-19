@@ -1,4 +1,5 @@
 {
+  "validity": "historical-only; withdrawn as comparative evidence after the 2026-10-19 harness audit; see eval/AUDIT.md",
   "generatedAt": "2026-10-18T09:25:55.443Z",
   "rounds": 4,
   "note": "Deterministic scripted agent and in-process model: this measures the compaction pipeline, not model quality.",
