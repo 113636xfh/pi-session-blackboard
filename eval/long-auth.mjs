@@ -18,7 +18,7 @@ export function assertAuthorizedSpec(spec, now = Date.now()) {
   if (!declared || spec.arm.extension !== declared.extension || spec.arm.compaction !== declared.compaction
     || childPath.startsWith('..') || isAbsolute(childPath)) throw new Error('Unexpected extension or output scope');
   if (spec.rounds !== 2 || !Number.isInteger(spec.maxTools) || spec.maxTools < 1 || spec.maxTools > 6
-    || spec.maxTokens !== 512 || !Number.isInteger(spec.maxRequests) || spec.maxRequests < 1 || spec.maxRequests > 20 * spec.cycles
+    || spec.maxTokens !== 512 || spec.summaryMaxTokens !== 2048 || !Number.isInteger(spec.maxRequests) || spec.maxRequests < 1 || spec.maxRequests > 20 * spec.cycles
     || spec.tail !== 800 || !Number.isFinite(spec.caseSeconds) || spec.caseSeconds <= 0 || spec.caseSeconds > 21600) throw new Error('Long-run action/output ceiling exceeded');
   if (m.mode === 'live' && (now < m.start || now >= m.end)) throw new Error('Outside authorized live window');
   return m;

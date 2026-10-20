@@ -47,7 +47,8 @@ export async function worker(spec) {
     if (!spec.live) runtime.registerProvider(provider, {
       api: 'openai-completions', baseUrl: 'http://127.0.0.1:1/unused', apiKey: 'synthetic',
       models: [{ id: modelId, name: 'Fixed fixture', input: ['text'], reasoning: false, contextWindow: 32000, maxTokens: spec.maxTokens, cost: ZERO_COST }],
-      streamSimple(model, context) {
+      streamSimple(model, context, providerOptions) {
+        if (isLong && phase === 'compact' && providerOptions.maxTokens !== spec.summaryMaxTokens) throw new Error('Summary output cap was not forwarded to provider');
         const stream = createAssistantMessageEventStream();
         // Fault injection is unreachable in live mode: exercise cancellation without a GPU.
         if (spec.fixtureFault === 'hang') { setInterval(() => {}, 1000); return stream; }
@@ -94,7 +95,7 @@ export async function worker(spec) {
     const model = runtime.getModel(provider, modelId);
     if (!model) throw new Error('Pinned model is unavailable; no fallback model permitted');
     save(join(dir, 'model.json'), { provider, model: model.id, api: model.api, contextWindow: model.contextWindow,
-      maxTokens: spec.maxTokens, temperature: 0, reasoning: 'off', live: spec.live });
+      maxTokens: spec.maxTokens, summaryMaxTokens: spec.summaryMaxTokens ?? spec.maxTokens, temperature: 0, reasoning: 'off', live: spec.live });
     const observations = [];
     // Observe actual request starts/completions, including native summarization and failed calls.
     for (const method of ['stream', 'streamSimple']) {
@@ -108,14 +109,15 @@ export async function worker(spec) {
         }
         phaseCalls++;
         if (requests.length >= spec.maxRequests) { fail('request budget exceeded', 'budget'); throw new Error(fatal); }
-        const record = { id: requests.length + 1, phase, cycle, kind: phase === 'compact' ? 'summarizer' : isLong && phase === 'resume' ? 'probe' : 'agent', method, startedMs: Date.now() - started, completed: false };
+        const maxTokens = isLong && phase === 'compact' ? spec.summaryMaxTokens : spec.maxTokens;
+        const record = { id: requests.length + 1, phase, cycle, maxTokens, kind: phase === 'compact' ? 'summarizer' : isLong && phase === 'resume' ? 'probe' : 'agent', method, startedMs: Date.now() - started, completed: false };
         requests.push(record); progress.modelCalls = requests.length; persist();
         const visibleContext = isLong && phase === 'resume' ? { ...context, tools: [] } : context;
         if (isLong) {
           record.inputPath = join(dir, 'requests', String(record.id), 'context.json');
-          save(record.inputPath, { systemPrompt: visibleContext.systemPrompt, messages: visibleContext.messages, tools: visibleContext.tools });
+          save(record.inputPath, { maxTokens, temperature: 0, systemPrompt: visibleContext.systemPrompt, messages: visibleContext.messages, tools: visibleContext.tools });
         }
-        const stream = original(selectedModel, visibleContext, { ...options, maxTokens: spec.maxTokens, temperature: 0,
+        const stream = original(selectedModel, visibleContext, { ...options, maxTokens, temperature: 0,
           timeoutMs: Math.min(60000, spec.caseSeconds * 1000), maxRetries: 0 });
         observations.push(stream.result().then(message => {
           record.completed = true; record.wallMs = Date.now() - started - record.startedMs;

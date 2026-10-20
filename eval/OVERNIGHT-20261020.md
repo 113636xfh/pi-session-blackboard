@@ -1,7 +1,22 @@
 # 2026-10-20 long-run preparation
 
-**Status: preparation only; step 47 is not complete. No real-model request has
-been made in this new window. No public-benchmark result or deployment claim.**
+**Status: step 47 incomplete; no public-benchmark result or deployment claim.**
+
+The original 05:00–11:00 window produced one failed native attempt: 11 requests,
+82.341 seconds supervised wall time, one completed cut/probe. It stopped at 05:03
+and was not resumed before expiry. Continuous execution was not delivered. At
+14:34 the user explicitly authorized a **new six-hour window from now**; the new
+manifest/artifact directory and ledger must stay separate from that failed run.
+
+The failure was the harness forcing the native summarizer to the same 512-token
+cap as ordinary agent replies. The second standard-format summary was truncated.
+The repair keeps agent/probe replies at 512 and independently caps summarization
+at 2048, records each effective cap, and independently verifies it. No truncation
+is relabeled as success. Revised fingerprint
+`5de117dcb92e55a03d800fc4b9cd7f306fc3169f7c7e6df8c14e4d2d64a38c50` passed
+37/37 offline tests in 409.400 seconds, including three-arm 2/16 cycles and actual
+provider-option forwarding. Preparation evidence below describes the earlier
+checkpoint, not a completed or continuously monitored six-hour live experiment.
 
 ## Authorization and order
 
@@ -75,7 +90,8 @@ outside the agent; it is not hand-filled into live notes. Read-only fork questio
 and answers are not copied back into the main trajectory.
 
 Native / old / current arms have version-appropriate tools/instructions. All
-requests use the pinned model, temperature 0 and output cap 512; two observation
+requests use the pinned model and temperature 0; agent/probe output cap 512 and
+summarizer cap 2048 after the recorded repair; two observation
 rounds per cycle, six tool calls per phase, twenty requests per cycle, common tail
 800 and reserve 4096. This is **not yet step 48's two matched-budget/default
 experiments**. Repair-spanning results must retain source versions and cannot be
