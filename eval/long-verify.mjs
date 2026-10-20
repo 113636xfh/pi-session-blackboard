@@ -29,7 +29,8 @@ export function verifyLongCase(spec, row) {
     check(row.cycles.length === spec.cycles, 'missing cycle evidence');
     if (!spec.live) check(row.offlineNetworkCalls === 0, 'offline network attempt');
     const model = json(join(spec.dir, 'model.json')), settings = json(join(spec.dir, 'settings.json'));
-    check(model.live === spec.live && model.maxTokens === spec.maxTokens && model.summaryMaxTokens === spec.summaryMaxTokens && model.reasoning === 'off', 'model/output settings mismatch');
+    check(model.live === spec.live && model.maxTokens === spec.maxTokens && model.summaryMaxTokens === spec.summaryMaxTokens
+      && (model.probeMaxTokens ?? model.maxTokens) === (spec.probeMaxTokens ?? spec.maxTokens) && model.reasoning === 'off', 'model/output settings mismatch');
     check(spec.live ? `${model.provider}/${model.model}` === spec.model : model.provider === 'eval-offline', 'wrong model');
     check(settings.compaction.enabled === false && settings.compaction.keepRecentTokens === spec.tail, 'tail/auto settings mismatch');
     check(JSON.stringify(settings.activeTools.slice().sort()) === JSON.stringify(['write', ...(spec.arm.extension ? ['blackboard', 'blackboard_recall'] : [])].sort()), 'unexpected active tools');
@@ -78,7 +79,7 @@ export function verifyLongCase(spec, row) {
     for (const [i, request] of row.requests.entries()) {
       check(request.id === i + 1 && (request.completed || request.error), 'unterminated request record');
       const input = json(request.inputPath);
-      const cap = request.kind === 'summarizer' ? spec.summaryMaxTokens : spec.maxTokens;
+      const cap = request.kind === 'summarizer' ? spec.summaryMaxTokens : request.kind === 'probe' ? (spec.probeMaxTokens ?? spec.maxTokens) : spec.maxTokens;
       check(request.maxTokens === cap && input.maxTokens === cap && input.temperature === 0, 'per-request output cap mismatch');
       if (request.kind === 'probe') check((input.tools ?? []).length === 0, 'probe had active tool definitions');
       if (request.completed) { const output = json(request.outputPath); check(output.stopReason === request.stopReason, 'response artifact mismatch'); }

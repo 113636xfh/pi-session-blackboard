@@ -20,7 +20,7 @@ function authorization(dir, tiers, mode = 'offline') {
 }
 function specFor(dir, arm, cycles, auth) {
   return { protocol: LONG_PROTOCOL, authorization: auth, arm, dir, live: false, model: MODEL,
-    cycles, rounds: 2, maxTokens: 512, summaryMaxTokens: 2048, maxTools: 6, maxRequests: cycles * 20, tail: 800, caseSeconds: 240 };
+    cycles, rounds: 2, maxTokens: 2048, probeMaxTokens: 512, summaryMaxTokens: 2048, maxTools: 6, maxRequests: cycles * 20, tail: 800, caseSeconds: 240 };
 }
 test('long inputs are incremental, never include future updates or diagnostic answers', () => {
   const first = longRound(1, 0, arms[0], 'fixture/cycle-1/step-1.txt');
@@ -48,6 +48,8 @@ test('authorization prevents early/late live work and enlarged scope', () => {
   assert.throws(() => assertAuthorizedSpec({ ...spec, cycles: 16 }, start), /scope/);
   assert.throws(() => assertAuthorizedSpec({ ...spec, maxRequests: 999 }, start), /ceiling/);
   assert.throws(() => assertAuthorizedSpec({ ...spec, summaryMaxTokens: 4096 }, start), /ceiling/);
+  assert.throws(() => assertAuthorizedSpec({ ...spec, maxTokens: 4096 }, start), /ceiling/);
+  assert.throws(() => assertAuthorizedSpec({ ...spec, probeMaxTokens: 1024 }, start), /ceiling/);
 });
 test('external stop signal terminates the supervised child and resolves after exit', { timeout: 10000 }, async () => {
   const abort = new AbortController(); let pid;
@@ -177,7 +179,7 @@ for (const cycles of [2, 16]) {
       assert.equal(row.offlineNetworkCalls, 0);
       assert.equal(row.requests.filter(r => r.kind === 'probe').length, cycles);
       assert(row.requests.every(r => r.completed));
-      assert(row.requests.every(r => r.maxTokens === (r.kind === 'summarizer' ? 2048 : 512)), 'summary cap is distinct from the agent/probe cap');
+      assert(row.requests.every(r => r.maxTokens === (r.kind === 'probe' ? 512 : 2048)), 'agent/summary caps must not reduce tool arguments to the probe cap');
       assert(!verifyLongCase(spec, { ...row, completedCycles: 999 }).executionPassed);
     }
   });

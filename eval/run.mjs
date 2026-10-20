@@ -48,7 +48,8 @@ export async function worker(spec) {
       api: 'openai-completions', baseUrl: 'http://127.0.0.1:1/unused', apiKey: 'synthetic',
       models: [{ id: modelId, name: 'Fixed fixture', input: ['text'], reasoning: false, contextWindow: 32000, maxTokens: spec.maxTokens, cost: ZERO_COST }],
       streamSimple(model, context, providerOptions) {
-        if (isLong && phase === 'compact' && providerOptions.maxTokens !== spec.summaryMaxTokens) throw new Error('Summary output cap was not forwarded to provider');
+        const expectedCap = phase === 'resume' ? spec.probeMaxTokens : phase === 'compact' ? spec.summaryMaxTokens : spec.maxTokens;
+        if (isLong && providerOptions.maxTokens !== expectedCap) throw new Error('Output cap was not forwarded to provider');
         const stream = createAssistantMessageEventStream();
         // Fault injection is unreachable in live mode: exercise cancellation without a GPU.
         if (spec.fixtureFault === 'hang') { setInterval(() => {}, 1000); return stream; }
@@ -101,7 +102,7 @@ export async function worker(spec) {
     const model = runtime.getModel(provider, modelId);
     if (!model) throw new Error('Pinned model is unavailable; no fallback model permitted');
     save(join(dir, 'model.json'), { provider, model: model.id, api: model.api, contextWindow: model.contextWindow,
-      maxTokens: spec.maxTokens, summaryMaxTokens: spec.summaryMaxTokens ?? spec.maxTokens, temperature: 0, reasoning: 'off', live: spec.live });
+      maxTokens: spec.maxTokens, probeMaxTokens: spec.probeMaxTokens ?? spec.maxTokens, summaryMaxTokens: spec.summaryMaxTokens ?? spec.maxTokens, temperature: 0, reasoning: 'off', live: spec.live });
     const observations = [];
     // Observe actual request starts/completions, including native summarization and failed calls.
     for (const method of ['stream', 'streamSimple']) {
@@ -115,7 +116,7 @@ export async function worker(spec) {
         }
         phaseCalls++;
         if (requests.length >= spec.maxRequests) { fail('request budget exceeded', 'budget'); throw new Error(fatal); }
-        const maxTokens = isLong && phase === 'compact' ? spec.summaryMaxTokens : spec.maxTokens;
+        const maxTokens = isLong && phase === 'compact' ? spec.summaryMaxTokens : isLong && phase === 'resume' ? spec.probeMaxTokens : spec.maxTokens;
         const record = { id: requests.length + 1, phase, cycle, maxTokens, kind: phase === 'compact' ? 'summarizer' : isLong && phase === 'resume' ? 'probe' : 'agent', method, startedMs: Date.now() - started, completed: false };
         requests.push(record); progress.modelCalls = requests.length; persist();
         const visibleContext = isLong && phase === 'resume' ? { ...context, tools: [] } : context;
