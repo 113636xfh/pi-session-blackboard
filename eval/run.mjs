@@ -74,6 +74,12 @@ export async function worker(spec) {
           else if (arm.id === 'board-fixed' && step === 2) call = { name: 'blackboard', arguments: { action: 'review' } };
           else if (arm.id === 'board-fixed' && step === 3 && credential) call = { name: 'blackboard', arguments: { action: 'commit', review: { id: credential, constraintsChecked: true, executionChecked: true, goalChecked: true } } };
         }
+        if (spec.fixtureFault === 'note-validation' && phase.startsWith('round') && arm.id === 'board-fixed') {
+          if (step === 1) { call.arguments.entries[0].section = 'constraints'; noteWrites--; }
+          if (step === 2) { call = { name: 'blackboard', arguments: { action: 'commit', entries: notes } }; noteWrites++; }
+          if (step === 3) call = { name: 'blackboard', arguments: { action: 'review' } };
+          if (step === 4 && credential) call = { name: 'blackboard', arguments: { action: 'commit', review: { id: credential, constraintsChecked: true, executionChecked: true, goalChecked: true } } };
+        }
         if (spec.fixtureFault === 'tool-loop' && phase.startsWith('round')) call = { name: 'write', arguments: { path: fixturePath(cycle, round, cycles), content: stepText } };
         if (spec.fixtureFault === 'extra-write' && step === 1) call = { name: 'write', arguments: { path: 'fixture/blackboard.md', content: 'unauthorized extra write' } };
         const text = isLong && phase === 'resume' ? (spec.fixtureFault === 'probe-bad-json' ? 'not json' : JSON.stringify(spec.fixtureFault === 'probe-wrong-state' ? { ...state, deployApproved: true } : state)) : phase === 'compact' || phase === 'resume'

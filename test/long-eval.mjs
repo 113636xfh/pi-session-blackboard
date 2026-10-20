@@ -80,6 +80,8 @@ test('scheduled Node argv entry works from unrelated ampersand cwd; expired live
 test('note error allowlist never treats I/O or unknown exceptions as model-correctable', () => {
   const error = value => ({ content: [{ type: 'text', text: value }] });
   assert(recoverableNoteError('blackboard', error('Blackboard journal: supersedes must match exactly one active entry')));
+  assert(recoverableNoteError('blackboard', error('Validation failed for tool "blackboard":\n  - entries.1.section: must be equal to constant')));
+  assert(!recoverableNoteError('blackboard', error('Validation failed for tool "blackboard":\n  - EIO unexpected I/O error')));
   for (const value of ['EIO disk failure', 'Blackboard journal: append not confirmed', 'TypeError: internal bug']) assert(!recoverableNoteError('blackboard', error(value)));
 });
 test('recovery accounts partial requests, preserves review across restart, requires explicit retry', () => {
@@ -153,6 +155,15 @@ for (const fault of ['probe-load', 'probe-init', 'probe-bind', 'probe-transport'
   });
 }
 
+test('real SDK note schema mistakes self-correct within the original phase budgets', { timeout: 45000 }, async () => {
+  const out = join(root, 'note-validation'), auth = authorization(out, [2]), arm = arms.find(a => a.id === 'board-fixed');
+  const spec = { ...specFor(join(out, arm.id), arm, 2, auth), fixtureFault: 'note-validation' }, path = join(out, 'spec.json'); save(path, spec);
+  const execution = await supervise(process.execPath, [resolve(ROOT, 'eval/run.mjs'), '--worker', path], { cwd: root, timeoutMs: 35000 });
+  const row = json(join(spec.dir, 'result.json')), v = verifyLongCase(spec, row);
+  assert.equal(execution.code, 0, execution.output); assert(v.executionPassed, JSON.stringify(v.issues));
+  assert(row.toolErrors.length > 0); assert(row.toolErrors.every(e => recoverableNoteError(e.tool, e.result)));
+  assert.equal(row.completedCycles, 2); assert.equal(row.offlineNetworkCalls, 0);
+});
 for (const cycles of [2, 16]) {
   test(`long-state ${cycles} cycles: real SDK forks, no probe writes to main, all available arms`, { timeout: 850000 }, async () => {
     const out = join(root, `cycles-${cycles}`), auth = authorization(out, [cycles]);
