@@ -16,7 +16,8 @@ is relabeled as success. Revised fingerprint
 `5de117dcb92e55a03d800fc4b9cd7f306fc3169f7c7e6df8c14e4d2d64a38c50` passed
 37/37 offline tests in 409.400 seconds, including three-arm 2/16 cycles and actual
 provider-option forwarding. Preparation evidence below describes the earlier
-checkpoint, not a completed or continuously monitored six-hour live experiment.
+checkpoint; renewed run evidence remains in the ignored `eval/results/long-20261020-renewed/`
+ledger. The renewed authorization ends 20:36:05+08:00 and is not a standing grant.
 
 ## Authorization and order
 
@@ -92,7 +93,7 @@ and answers are not copied back into the main trajectory.
 Native / old / current arms have version-appropriate tools/instructions. All
 requests use the pinned model and temperature 0; agent/probe output cap 512 and
 summarizer cap 2048 after the recorded repair; two observation
-rounds per cycle, six tool calls per phase, twenty requests per cycle, common tail
+rounds per cycle, twelve tool calls per phase (user-approved and frozen), twenty requests per cycle, common tail
 800 and reserve 4096. This is **not yet step 48's two matched-budget/default
 experiments**. Repair-spanning results must retain source versions and cannot be
 called frozen-version A/B evidence.

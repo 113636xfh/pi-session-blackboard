@@ -221,19 +221,21 @@ test('continuation reruns only failed groups, rechecks successes and charges eve
 });
 
 for (const fault of ['tool-loop', 'model-error', 'extra-write', 'hang']) {
-  test(`real SDK fake ${fault}: cannot pass or issue unbounded requests`, { timeout: 20000 }, async () => {
+  test(`real SDK fake ${fault}: cannot pass or issue unbounded requests`, { timeout: 45000 }, async () => {
     const options = parse(['--arm', 'native']);
     preflight(options);
     const dir = join(fixtureRoot, fault), specPath = join(dir, 'spec.json');
     save(specPath, { ...options, dir, arm: config.arms[0], fixtureFault: fault, maxTools: fault === 'extra-write' ? 6 : 1 });
     const execution = await supervise(process.execPath, [resolve(ROOT, 'eval/run.mjs'), '--worker', specPath], {
-      cwd: fixtureRoot, timeoutMs: fault === 'hang' ? 8000 : 15000,
+      // Include bounded SDK cold-import time; the hang must actually reach its provider.
+      cwd: fixtureRoot, timeoutMs: fault === 'hang' ? 30000 : 35000,
     });
     const partial = json(join(dir, 'progress.json'));
     assert(partial.modelCalls <= 2);
     if (fault === 'hang') {
       assert(execution.timedOut);
       assert.equal(partial.completedRounds, 0);
+      assert.equal(partial.modelCalls, 1, 'a startup timeout is not an exercised provider hang');
       assert.equal(partial.requests[0].completed, false);
     } else {
       assert.notEqual(execution.code, 0, execution.output);
