@@ -85,6 +85,9 @@ test('note error allowlist never treats I/O or unknown exceptions as model-corre
   assert(recoverableNoteError('blackboard', error('Blackboard journal: supersedes must match exactly one active entry')));
   assert(recoverableNoteError('blackboard', error('Validation failed for tool "blackboard":\n  - entries.1.section: must be equal to constant')));
   assert(!recoverableNoteError('blackboard', error('Validation failed for tool "blackboard":\n  - EIO unexpected I/O error')));
+  assert(recoverableNoteError('blackboard', error('Source fake-source missing, changed or wrong kind')));
+  assert(!recoverableNoteError('blackboard', error('Source fake-source missing, changed or wrong kind; EIO disk full')));
+  assert(!recoverableNoteError('blackboard_recall', error('Source fake-source missing, changed or wrong kind')));
   for (const value of ['EIO disk failure', 'Blackboard journal: append not confirmed', 'TypeError: internal bug']) assert(!recoverableNoteError('blackboard', error(value)));
 });
 test('recovery accounts partial requests, preserves review across restart, requires explicit retry', () => {
@@ -158,6 +161,17 @@ for (const fault of ['probe-load', 'probe-init', 'probe-bind', 'probe-transport'
   });
 }
 
+test('real SDK invalid source references self-correct without inventing or persisting them', { timeout: 45000 }, async () => {
+  const out = join(root, 'note-source'), auth = authorization(out, [2]), arm = arms.find(a => a.id === 'board-fixed');
+  const spec = { ...specFor(join(out, arm.id), arm, 2, auth), fixtureFault: 'note-source' }, path = join(out, 'spec.json'); save(path, spec);
+  const execution = await supervise(process.execPath, [resolve(ROOT, 'eval/run.mjs'), '--worker', path], { cwd: root, timeoutMs: 35000 });
+  const row = json(join(spec.dir, 'result.json')), v = verifyLongCase(spec, row);
+  assert.equal(execution.code, 0, execution.output); assert(v.executionPassed, JSON.stringify(v.issues));
+  assert(row.toolErrors.some(e => /Source fake-source missing/.test(e.result.content[0].text)));
+  assert(row.toolErrors.every(e => recoverableNoteError(e.tool, e.result)));
+  assert.equal(row.completedCycles, 2); assert.equal(row.offlineNetworkCalls, 0);
+  assert(row.toolErrors.length <= spec.maxTools * spec.cycles, 'correction remains within the frozen tool budget');
+});
 test('real SDK note schema mistakes self-correct within the original phase budgets', { timeout: 45000 }, async () => {
   const out = join(root, 'note-validation'), auth = authorization(out, [2]), arm = arms.find(a => a.id === 'board-fixed');
   const spec = { ...specFor(join(out, arm.id), arm, 2, auth), fixtureFault: 'note-validation' }, path = join(out, 'spec.json'); save(path, spec);

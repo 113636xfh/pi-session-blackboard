@@ -4,6 +4,7 @@ export function recoverableNoteError(tool, result) {
   const message = (result?.content ?? []).filter(p => p.type === 'text').map(p => p.text).join('\n');
   if (/\b(EIO|EACCES|EPERM|ENOSPC|EMFILE|ENOENT|EBUSY)\b|append not confirmed|unexpected branch|cannot be replayed|writer lock/i.test(message)) return false;
   if (/^Validation failed for tool "(?:blackboard|blackboard_recall)":\n  - /.test(message)) return true;
+  if (/^Source [A-Za-z0-9_-]+ missing, changed or wrong kind$/.test(message)) return tool === 'blackboard';
   return [
     'Blackboard journal: supersedes must match exactly one active entry',
     'Blackboard journal: ID updates require current expectedRevision',
