@@ -13,9 +13,9 @@ import { reconcileLongState, applyReviewDecision, pendingReviewAttempts } from '
 const root = mkdtempSync(join(tmpdir(), 'sbb long & paths '));
 const json = path => JSON.parse(readFileSync(path, 'utf8'));
 const arms = config.arms.filter(a => !a.extension || existsSync(resolve(ROOT, a.extension)));
-function authorization(dir, tiers, mode = 'offline') {
+function authorization(dir, tiers, mode = 'offline', summaryMaxTokens = 2048) {
   const path = join(dir, 'authorization.json');
-  save(path, { schema: 1, authorized: true, mode, model: MODEL, startAt: '2026-10-20T05:00:00+08:00', deadline: '2026-10-20T11:00:00+08:00', tiers, arms: arms.map(a => a.id), out: dir, protocol: LONG_PROTOCOL });
+  save(path, { schema: 1, authorized: true, mode, model: MODEL, startAt: '2026-10-20T05:00:00+08:00', deadline: '2026-10-20T11:00:00+08:00', tiers, arms: arms.map(a => a.id), out: dir, protocol: LONG_PROTOCOL, summaryMaxTokens });
   return path;
 }
 function specFor(dir, arm, cycles, auth) {
@@ -51,6 +51,10 @@ test('authorization prevents early/late live work and enlarged scope', () => {
   assert.throws(() => assertAuthorizedSpec({ ...spec, maxTokens: 4096 }, start), /ceiling/);
   assert.throws(() => assertAuthorizedSpec({ ...spec, probeMaxTokens: 1024 }, start), /ceiling/);
   assert.throws(() => assertAuthorizedSpec({ ...spec, maxTools: 13 }, start), /ceiling/);
+  const cap4096 = authorization(join(root, 'auth-4096'), [2], 'offline', 4096);
+  const wide = { ...spec, live: false, authorization: cap4096, dir: join(root, 'auth-4096', arms[0].id), summaryMaxTokens: 4096 };
+  assertAuthorizedSpec(wide, start);
+  assert.throws(() => assertAuthorizedSpec({ ...wide, summaryMaxTokens: 2048 }, start), /ceiling/);
 });
 test('external stop signal terminates the supervised child and resolves after exit', { timeout: 10000 }, async () => {
   const abort = new AbortController(); let pid;
@@ -62,7 +66,7 @@ test('scheduled Node argv entry works from unrelated ampersand cwd; expired live
   const out = join(root, 'launcher-proof'), auth = join(out, 'authorization.json'), now = Date.now();
   const manifest = { schema: 1, authorized: true, mode: 'offline', model: MODEL,
     startAt: new Date(now - 1000).toISOString(), deadline: new Date(now + 120000).toISOString(),
-    tiers: [2], arms: ['native'], out, protocol: LONG_PROTOCOL };
+    tiers: [2], arms: ['native'], out, protocol: LONG_PROTOCOL, summaryMaxTokens: 2048 };
   save(auth, manifest);
   const execution = await supervise(process.execPath, [resolve(ROOT, 'eval/scheduled.mjs'), auth, join(out, 'launch.log')], { cwd: root, timeoutMs: 45000 });
   assert.equal(execution.code, 0, execution.output);
@@ -105,7 +109,7 @@ test('recovery accounts partial requests, preserves review across restart, requi
 });
 test('controller restart stays at pending review instead of silently issuing new calls', { timeout: 20000 }, async () => {
   const out = join(root, 'pending-review'), auth = join(out, 'authorization.json'), now = Date.now();
-  save(auth, { schema: 1, authorized: true, mode: 'offline', model: MODEL, startAt: new Date(now - 1000).toISOString(), deadline: new Date(now + 60000).toISOString(), tiers: [2], arms: ['native'], out, protocol: LONG_PROTOCOL });
+  save(auth, { schema: 1, authorized: true, mode: 'offline', model: MODEL, startAt: new Date(now - 1000).toISOString(), deadline: new Date(now + 60000).toISOString(), tiers: [2], arms: ['native'], out, protocol: LONG_PROTOCOL, summaryMaxTokens: 2048 });
   save(join(out, 'state.json'), { schema: 1, stage: 47, cases: [], sourceVersions: [], active: null,
     attempts: [{ id: 'failed-before-review-save', arm: 'native', cycles: 2, dir: join(out, 'failed'), executionPassed: false, modelCalls: 3 }] });
   for (let restart = 0; restart < 2; restart++) {
@@ -125,7 +129,7 @@ test('controller restart stays at pending review instead of silently issuing new
 });
 test('multiple pending reviews must ALL be decided before any new worker', { timeout: 12000 }, async () => {
   const out = join(root, 'multiple-review'), auth = join(out, 'authorization.json'), now = Date.now();
-  save(auth, { schema: 1, authorized: true, mode: 'offline', model: MODEL, startAt: new Date(now - 1000).toISOString(), deadline: new Date(now + 60000).toISOString(), tiers: [2], arms: ['native', 'board-fixed'], out, protocol: LONG_PROTOCOL });
+  save(auth, { schema: 1, authorized: true, mode: 'offline', model: MODEL, startAt: new Date(now - 1000).toISOString(), deadline: new Date(now + 60000).toISOString(), tiers: [2], arms: ['native', 'board-fixed'], out, protocol: LONG_PROTOCOL, summaryMaxTokens: 2048 });
   const seed = { schema: 1, stage: 47, cases: [], sourceVersions: [], active: null, attempts: [
     { id: 'a', arm: 'native', cycles: 2, dir: join(out, 'a'), executionPassed: false, modelCalls: 3 },
     { id: 'b', arm: 'board-fixed', cycles: 2, dir: join(out, 'b'), executionPassed: false, modelCalls: 4 },
@@ -181,6 +185,16 @@ test('real SDK note schema mistakes self-correct within the original phase budge
   assert(row.toolErrors.length > 0); assert(row.toolErrors.every(e => recoverableNoteError(e.tool, e.result)));
   assert.equal(row.completedCycles, 2); assert.equal(row.offlineNetworkCalls, 0);
 });
+test('authorized 4096 summary cap is forwarded, recorded and independently verified across arms', { timeout: 60000 }, async () => {
+  const out = join(root, 'cap-4096'), auth = authorization(out, [2], 'offline', 4096);
+  for (const arm of arms) {
+    const spec = { ...specFor(join(out, arm.id), arm, 2, auth), summaryMaxTokens: 4096 }, path = join(out, `${arm.id}.json`); save(path, spec);
+    const execution = await supervise(process.execPath, [resolve(ROOT, 'eval/run.mjs'), '--worker', path], { cwd: root, timeoutMs: 45000 });
+    const row = json(join(spec.dir, 'result.json')), v = verifyLongCase(spec, row);
+    assert.equal(execution.code, 0, execution.output); assert(v.executionPassed, JSON.stringify(v.issues));
+    assert(row.requests.filter(r => r.kind === 'summarizer').every(r => r.maxTokens === 4096));
+  }
+});
 for (const cycles of [2, 16]) {
   test(`long-state ${cycles} cycles: real SDK forks, no probe writes to main, all available arms`, { timeout: 850000 }, async () => {
     const out = join(root, `cycles-${cycles}`), auth = authorization(out, [cycles]);
@@ -194,7 +208,7 @@ for (const cycles of [2, 16]) {
       assert.equal(row.offlineNetworkCalls, 0);
       assert.equal(row.requests.filter(r => r.kind === 'probe').length, cycles);
       assert(row.requests.every(r => r.completed));
-      assert(row.requests.every(r => r.maxTokens === (r.kind === 'probe' ? 512 : 2048)), 'agent/summary caps must not reduce tool arguments to the probe cap');
+      assert(row.requests.every(r => r.maxTokens === (r.kind === 'probe' ? 512 : r.kind === 'summarizer' ? 2048 : 2048)), 'agent/summary caps must not reduce tool arguments to the probe cap');
       assert(!verifyLongCase(spec, { ...row, completedCycles: 999 }).executionPassed);
     }
   });

@@ -90,7 +90,7 @@ export async function runOvernight(path) {
           const remaining = m.end - Date.now();
           const currentArm = preflight({ arms: [arm.id] })[0];
           const spec = { protocol: m.protocol, authorization, task: 'long-state', live: m.mode === 'live', model: m.model,
-            arm: currentArm, dir, cycles, rounds: 2, tail: 800, maxTokens: 2048, probeMaxTokens: 512, summaryMaxTokens: 2048, maxTools: 12, maxRequests: cycles * 20,
+            arm: currentArm, dir, cycles, rounds: 2, tail: 800, maxTokens: 2048, probeMaxTokens: 512, summaryMaxTokens: m.summaryMaxTokens, maxTools: 12, maxRequests: cycles * 20,
             caseSeconds: m.mode === 'live' ? Math.min(remaining / 1000, 120 + cycles * 240) : Math.min(remaining / 1000, 30 + cycles * 15) };
           const specPath = join(dir, 'spec.json'); save(specPath, spec);
           state.status = 'running'; state.active = { id, cycles, arm: arm.id, dir, sourceDigest: receipt.digest, startedAt: new Date().toISOString(), pid: null }; persist();
