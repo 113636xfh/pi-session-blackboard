@@ -24,6 +24,7 @@ export function verifyLongCase(spec, row) {
   const issues = [], diagnostics = [], check = (ok, why) => { if (!ok) issues.push(why); };
   try {
     check(row?.executionPassed === true && row.status === 'completed', 'worker did not complete execution');
+    check(row.protocol === spec.protocol, 'result protocol does not match worker spec');
     check(row.completedCycles === spec.cycles && row.completedRounds === spec.cycles * spec.rounds, 'cycle/round count mismatch');
     check(row.modelCalls === row.requests.length && row.modelCalls <= spec.maxRequests, 'request budget/count mismatch');
     check(row.cycles.length === spec.cycles, 'missing cycle evidence');
@@ -74,7 +75,7 @@ export function verifyLongCase(spec, row) {
         check(answer?.message.role === 'assistant' && text(answer.message) === evidence.answer && evidence.answer === probe.answer, 'probe answer differs from persisted response');
         const prompt = [...snapshot.nodes.slice(0, snapshot.nodes.indexOf(answer))].reverse().find(n => n.message?.role === 'user');
         check(text(prompt?.message) === longProbePrompt, 'wrong persisted diagnostic prompt');
-        diagnostics.push({ cycle, outcome: 'completed', ...evaluateLongAnswer(cycle, text(answer.message)) });
+        diagnostics.push({ cycle, outcome: 'completed', ...evaluateLongAnswer(cycle, text(answer.message), spec.protocol) });
       }
     }
     for (const [i, request] of row.requests.entries()) {

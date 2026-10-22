@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { ROOT, MODEL, config, save } from '../eval/protocol.mjs';
 import { LONG_PROTOCOL, expectedState, longSystem, longRound, longProbePrompt, evaluateLongAnswer } from '../eval/long-protocol.mjs';
-import { assertAuthorizedSpec } from '../eval/long-auth.mjs';
+import { assertAuthorizedSpec, readAuthorization } from '../eval/long-auth.mjs';
 import { supervise } from '../eval/process.mjs';
 import { verifyLongCase } from '../eval/long-verify.mjs';
 import { recoverableNoteError } from '../eval/long-errors.mjs';
@@ -45,6 +45,13 @@ test('long inputs are incremental, never include future updates or diagnostic an
   assert.equal(expectedState(16).path, 'src/rollback/Restore.ts');
   assert.equal(evaluateLongAnswer(16, '{}').passed, false);
   assert.equal(evaluateLongAnswer(16, 'not json').score, null);
+  const equivalentNext = { ...expectedState(2), next: 'Awaiting staging permission.' };
+  const v2 = evaluateLongAnswer(2, JSON.stringify(equivalentNext), 'long-state-v2');
+  assert(v2.passed); assert.equal(v2.fields.find(f => f.field === 'next').exactMatch, false);
+  assert.equal(v2.fields.find(f => f.field === 'next').normalizedMatch, true);
+  assert.equal(evaluateLongAnswer(2, JSON.stringify(equivalentNext), 'long-state-v1').passed, false, 'v1 exact scorer remains frozen');
+  const wrongPath = { ...expectedState(2), path: 'fixture/cycle-2/step-1.txt' };
+  assert.equal(evaluateLongAnswer(2, JSON.stringify(wrongPath), 'long-state-v2').passed, false, 'v2 never normalizes source paths');
 });
 test('8/16 expansion requires execution and quality passes at both 2 and 4 cycles for every arm', () => {
   const matrix = [2, 4].flatMap(cycles => arms.map(arm => ({ cycles, arm: arm.id, executionPassed: true, qualityPassed: true })));
@@ -61,6 +68,7 @@ test('authorization prevents early/late live work and enlarged scope', () => {
   assertAuthorizedSpec(spec, start);
   assert.throws(() => assertAuthorizedSpec(spec, end), /Outside/);
   assert.throws(() => assertAuthorizedSpec({ ...spec, cycles: 16 }, start), /scope/);
+  assert.throws(() => assertAuthorizedSpec({ ...spec, protocol: 'long-state-v1' }, start), /protocol/);
   assert.throws(() => assertAuthorizedSpec({ ...spec, maxRequests: 999 }, start), /ceiling/);
   assert.throws(() => assertAuthorizedSpec({ ...spec, summaryMaxTokens: 4096 }, start), /ceiling/);
   assert.throws(() => assertAuthorizedSpec({ ...spec, maxTokens: 4096 }, start), /ceiling/);
@@ -70,6 +78,10 @@ test('authorization prevents early/late live work and enlarged scope', () => {
   const wide = { ...spec, live: false, authorization: cap4096, dir: join(root, 'auth-4096', arms[0].id), summaryMaxTokens: 4096 };
   assertAuthorizedSpec(wide, start);
   assert.throws(() => assertAuthorizedSpec({ ...wide, summaryMaxTokens: 2048 }, start), /ceiling/);
+  const legacy = join(root, 'legacy-protocol');
+  const legacyAuth = authorization(legacy, [2]);
+  save(legacyAuth, { ...json(legacyAuth), protocol: 'long-state-v1' });
+  assert.equal(readAuthorization(legacyAuth).protocol, 'long-state-v1', 'historical v1 manifests remain readable');
 });
 test('external stop signal terminates the supervised child and resolves after exit', { timeout: 10000 }, async () => {
   const abort = new AbortController(); let pid;

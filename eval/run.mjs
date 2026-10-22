@@ -220,7 +220,7 @@ export async function worker(spec) {
         resumeOk: probe.mustContain ? answer.includes(probe.mustContain) : !answer.includes(probe.mustNotContain),
       }));
       // Literal mention of a withdrawal is not resurrection. This is wiring, not a semantic score.
-      const diagnostic = isLong ? evaluateLongAnswer(cycle, answer) : null;
+      const diagnostic = isLong ? evaluateLongAnswer(cycle, answer, spec.protocol) : null;
       const passed = isLong ? diagnostic.passed && !probe.error && probe.stopReason === 'stop'
         : results.filter(p => p.mustContain).every(p => p.summaryOk && p.resumeOk) && errors.length === 0;
       const takeovers = compacted.details?.generator === 'pi-session-blackboard' && compacted.details?.schema === 2 ? 1
