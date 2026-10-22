@@ -35,26 +35,28 @@ export async function runOvernight(path) {
   const log = message => { const line = `${new Date().toISOString()} ${message}\n`; console.log(line.trim()); appendFileSync(join(m.out, 'controller.log'), line); };
   const stopRequested = () => interrupted || existsSync(stopPath) || Date.now() >= m.end;
   const stopStatus = () => interrupted || existsSync(stopPath) ? 'stopped' : 'expired';
-  const waitReview = async attempt => {
-    state.status = 'needs-review'; state.reviewAttempt = attempt.id; persist();
-    log(`NEEDS_REVIEW ${attempt.id}; no further model request until agent acknowledges`);
-    while (!stopRequested()) {
-      if (existsSync(controlPath)) {
-        const command = read(controlPath);
-        let progress = null; try { progress = read(join(attempt.dir, 'progress.json')); } catch { /* unresolved requires explicit confirmation */ }
-        if (attempt.recovered && (attempt.workerPid ?? progress?.pid) && alive(attempt.workerPid ?? progress.pid)) throw new Error('Recovered worker is still alive; refuse another attempt');
-        const action = applyReviewDecision(state, command, authorization);
-        if (action) { persist(); rmSync(controlPath); return action; }
-      }
-      persist(); await sleep(1000);
+  const autoResolveReview = attempt => {
+    const key = `${attempt.cycles}-${attempt.arm}`;
+    state.retryCounts ??= {};
+    const retries = state.retryCounts[key] ?? 0;
+    const action = retries < 1 ? 'retry' : 'accept-failure';
+    if (attempt.recovered) {
+      const pid = attempt.workerPid ?? state.active?.pid;
+      if (pid && alive(pid)) throw new Error(`Recovered worker may still be alive: ${pid}`);
     }
-    return 'stop';
+    if (action === 'retry') state.retryCounts[key] = retries + 1;
+    const applied = applyReviewDecision(state, { attempt: attempt.id, action, confirmedNoWorker: true }, authorization);
+    if (!applied) throw new Error(`Could not automatically resolve attempt ${attempt.id}`);
+    log(`AUTO_${action.toUpperCase()} ${attempt.id}; same fixed scope; retry ${state.retryCounts[key] ?? retries}/1`);
+    persist();
+    return action;
   };
   const drainReviews = async () => {
     while (state.reviewAttempt && !stopRequested()) {
       const pending = state.attempts.find(a => a.id === state.reviewAttempt);
       if (!pending) throw new Error('Pending review has no accounted attempt');
-      if (await waitReview(pending) === 'stop') return false;
+      const action = autoResolveReview(pending);
+      if (action === 'stop') return false;
     }
     return !stopRequested();
   };
@@ -91,6 +93,7 @@ export async function runOvernight(path) {
           const currentArm = preflight({ arms: [arm.id] })[0];
           const spec = { protocol: m.protocol, authorization, task: 'long-state', live: m.mode === 'live', model: m.model,
             arm: currentArm, dir, cycles, rounds: 2, tail: 800, maxTokens: 2048, probeMaxTokens: 512, summaryMaxTokens: m.summaryMaxTokens, maxTools: 12, maxRequests: cycles * 20,
+            thinkingLevel: m.thinkingLevel ?? 'off',
             caseSeconds: m.mode === 'live' ? Math.min(remaining / 1000, 120 + cycles * 240) : Math.min(remaining / 1000, 30 + cycles * 15) };
           const specPath = join(dir, 'spec.json'); save(specPath, spec);
           state.status = 'running'; state.active = { id, cycles, arm: arm.id, dir, sourceDigest: receipt.digest, startedAt: new Date().toISOString(), pid: null }; persist();
@@ -126,11 +129,9 @@ export async function runOvernight(path) {
           else state.reviewAttempt = attempt.id;
           persist();
           log(`END ${id} execution=${executionPassed} quality=${attempt.qualityPassed} calls=${attempt.modelCalls ?? 'unknown'}`);
-          if (!executionPassed) {
-            if (stopRequested()) break;
-            const decision = await waitReview(attempt);
+          if (!executionPassed && !stopRequested()) {
+            const decision = autoResolveReview(attempt);
             if (decision === 'retry') retry = true;
-            else if (decision === 'stop') { state.status = 'stopped'; persist(); return 1; }
           }
           persist();
         }

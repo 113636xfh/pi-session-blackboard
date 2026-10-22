@@ -30,7 +30,8 @@ export function verifyLongCase(spec, row) {
     if (!spec.live) check(row.offlineNetworkCalls === 0, 'offline network attempt');
     const model = json(join(spec.dir, 'model.json')), settings = json(join(spec.dir, 'settings.json'));
     check(model.live === spec.live && model.maxTokens === spec.maxTokens && model.summaryMaxTokens === spec.summaryMaxTokens
-      && (model.probeMaxTokens ?? model.maxTokens) === (spec.probeMaxTokens ?? spec.maxTokens) && model.reasoning === 'off', 'model/output settings mismatch');
+      && (model.probeMaxTokens ?? model.maxTokens) === (spec.probeMaxTokens ?? spec.maxTokens)
+      && model.reasoning === (spec.thinkingLevel ?? 'off'), 'model/output settings mismatch');
     check(spec.live ? `${model.provider}/${model.model}` === spec.model : model.provider === 'eval-offline', 'wrong model');
     check(settings.compaction.enabled === false && settings.compaction.keepRecentTokens === spec.tail, 'tail/auto settings mismatch');
     check(JSON.stringify(settings.activeTools.slice().sort()) === JSON.stringify(['write', ...(spec.arm.extension ? ['blackboard', 'blackboard_recall'] : [])].sort()), 'unexpected active tools');

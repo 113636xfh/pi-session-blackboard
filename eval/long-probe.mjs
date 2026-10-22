@@ -6,7 +6,7 @@ import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsMana
 import { longProbePrompt, longSystem } from './long-protocol.mjs';
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 const text = m => (m?.content ?? []).filter(p => p.type === 'text').map(p => p.text).join('\n');
-export async function snapshotProbe({ manager, runtime, model, extension, project, dir, cycle, arm, tail, onActive, onFailure, fault }) {
+export async function snapshotProbe({ manager, runtime, model, extension, project, dir, cycle, arm, tail, onActive, onFailure, fault, thinkingLevel = 'off' }) {
   const originalFile = manager.getSessionFile(), sourceBytes = statSync(originalFile).size, mainHashBefore = hash(originalFile);
   const fork = SessionManager.open(originalFile, join(dir, 'probes', String(cycle)), project);
   fork.createBranchedSession(manager.getLeafId());
@@ -22,7 +22,7 @@ export async function snapshotProbe({ manager, runtime, model, extension, projec
     if (loader.getExtensions().errors.length) throw new Error('Probe extension failed to load');
     if (fault === 'probe-init') throw new Error('Injected probe initialization failure');
     const created = await createAgentSession({ cwd: project, agentDir: join(project, 'probe-agent'), modelRuntime: runtime, model,
-      thinkingLevel: 'off', sessionManager: fork, settingsManager: settings, resourceLoader: loader, tools: [] });
+      thinkingLevel, sessionManager: fork, settingsManager: settings, resourceLoader: loader, tools: [] });
     probe = created.session;
     await probe.bindExtensions({ mode: 'print', onError: err => { error ??= String(err); onFailure?.(error); void probe.abort().catch(() => {}); } });
     if (error) throw new Error(error);

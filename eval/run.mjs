@@ -108,7 +108,7 @@ export async function worker(spec) {
     const model = runtime.getModel(provider, modelId);
     if (!model) throw new Error('Pinned model is unavailable; no fallback model permitted');
     save(join(dir, 'model.json'), { provider, model: model.id, api: model.api, contextWindow: model.contextWindow,
-      maxTokens: spec.maxTokens, probeMaxTokens: spec.probeMaxTokens ?? spec.maxTokens, summaryMaxTokens: spec.summaryMaxTokens ?? spec.maxTokens, temperature: 0, reasoning: 'off', live: spec.live });
+      maxTokens: spec.maxTokens, probeMaxTokens: spec.probeMaxTokens ?? spec.maxTokens, summaryMaxTokens: spec.summaryMaxTokens ?? spec.maxTokens, temperature: 0, reasoning: spec.thinkingLevel ?? 'off', live: spec.live });
     const observations = [];
     // Observe actual request starts/completions, including native summarization and failed calls.
     for (const method of ['stream', 'streamSimple']) {
@@ -168,7 +168,7 @@ export async function worker(spec) {
     if (loader.getExtensions().errors.length) throw new Error(`Extension load errors: ${JSON.stringify(loader.getExtensions().errors)}`);
     if (extension && !loader.getExtensions().extensions.some(e => resolve(e.path) === extension)) throw new Error('Requested extension was not loaded');
     const created = await createAgentSession({ cwd: project, agentDir: join(project, 'agent'), modelRuntime: runtime,
-      model, thinkingLevel: 'off', sessionManager: manager, settingsManager: settings, resourceLoader: loader,
+      model, thinkingLevel: spec.thinkingLevel ?? 'off', sessionManager: manager, settingsManager: settings, resourceLoader: loader,
       tools: ['write', ...(arm.extension ? ['blackboard', 'blackboard_recall'] : [])] });
     session = created.session; activeSession = session;
     session.subscribe(event => {
@@ -207,7 +207,8 @@ export async function worker(spec) {
       let probe = null;
       if (isLong) probe = await snapshotProbe({ manager, runtime, model, extension, project, dir, cycle, arm, tail: spec.tail,
         onActive: target => { activeSession = target ?? session; },
-        onFailure: reason => { fatal ??= reason; failureKind = 'probe-execution'; persist(); }, fault: spec.live ? null : spec.fixtureFault });
+        onFailure: reason => { fatal ??= reason; failureKind = 'probe-execution'; persist(); }, fault: spec.live ? null : spec.fixtureFault,
+        thinkingLevel: spec.thinkingLevel ?? 'off' });
       else await session.prompt(resumePrompt);
       await Promise.all(observations);
       if (fatal) throw new Error(fatal);

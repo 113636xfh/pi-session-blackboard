@@ -107,27 +107,20 @@ test('recovery accounts partial requests, preserves review across restart, requi
   assert.equal(state.reviewAttempt, null);
   assert.equal(reconcileLongState(state, '').reviewAttempt, null, 'one explicit retry decision survives a restart');
 });
-test('controller restart stays at pending review instead of silently issuing new calls', { timeout: 20000 }, async () => {
-  const out = join(root, 'pending-review'), auth = join(out, 'authorization.json'), now = Date.now();
+test('controller automatically retries one failed case without a human review', { timeout: 45000 }, async () => {
+  const out = join(root, 'automatic-retry'), auth = join(out, 'authorization.json'), now = Date.now();
   save(auth, { schema: 1, authorized: true, mode: 'offline', model: MODEL, startAt: new Date(now - 1000).toISOString(), deadline: new Date(now + 60000).toISOString(), tiers: [2], arms: ['native'], out, protocol: LONG_PROTOCOL, summaryMaxTokens: 2048 });
   save(join(out, 'state.json'), { schema: 1, stage: 47, cases: [], sourceVersions: [], active: null,
     attempts: [{ id: 'failed-before-review-save', arm: 'native', cycles: 2, dir: join(out, 'failed'), executionPassed: false, modelCalls: 3 }] });
-  for (let restart = 0; restart < 2; restart++) {
-    const timer = setInterval(() => {
-      try {
-        const state = json(join(out, 'state.json'));
-        if (state.status === 'needs-review') save(join(out, 'control.json'), { attempt: state.reviewAttempt, action: 'stop' });
-      } catch { /* startup */ }
-    }, 100);
-    try {
-      const result = await supervise(process.execPath, [resolve(ROOT, 'eval/overnight.mjs'), '--manifest', auth], { cwd: root, timeoutMs: 8000 });
-      assert.equal(result.code, 1, result.output);
-      const state = json(join(out, 'state.json'));
-      assert.equal(state.attempts.length, 1); assert.equal(state.attempts[0].modelCalls, 3); assert.equal(state.reviewAttempt, 'failed-before-review-save');
-    } finally { clearInterval(timer); }
-  }
+  const result = await supervise(process.execPath, [resolve(ROOT, 'eval/overnight.mjs'), '--manifest', auth], { cwd: root, timeoutMs: 40000 });
+  assert.equal(result.code, 0, result.output);
+  const state = json(join(out, 'state.json'));
+  assert.equal(state.retryCounts['2-native'], 1);
+  assert(state.decisions.some(d => d.attempt === 'failed-before-review-save' && d.action === 'retry'));
+  assert.equal(state.attempts.length, 2); assert.equal(state.cases.find(c => c.arm === 'native' && c.cycles === 2).executionPassed, true);
+  assert.equal(state.reviewAttempt, null); assert.equal(state.status, 'stage-completed');
 });
-test('multiple pending reviews must ALL be decided before any new worker', { timeout: 12000 }, async () => {
+test('multiple pending reviews auto-resolve before continuing without a person', { timeout: 60000 }, async () => {
   const out = join(root, 'multiple-review'), auth = join(out, 'authorization.json'), now = Date.now();
   save(auth, { schema: 1, authorized: true, mode: 'offline', model: MODEL, startAt: new Date(now - 1000).toISOString(), deadline: new Date(now + 60000).toISOString(), tiers: [2], arms: ['native', 'board-fixed'], out, protocol: LONG_PROTOCOL, summaryMaxTokens: 2048 });
   const seed = { schema: 1, stage: 47, cases: [], sourceVersions: [], active: null, attempts: [
@@ -139,16 +132,11 @@ test('multiple pending reviews must ALL be decided before any new worker', { tim
   applyReviewDecision(pure, { attempt: 'a', action: 'retry' }, auth);
   assert.equal(pure.reviewAttempt, 'b');
   save(join(out, 'state.json'), seed);
-  const timer = setInterval(() => { try {
-    const s = json(join(out, 'state.json'));
-    if (s.status === 'needs-review') save(join(out, 'control.json'), { attempt: s.reviewAttempt, action: s.reviewAttempt === 'a' ? 'retry' : 'stop' });
-  } catch {} }, 100);
-  try {
-    const result = await supervise(process.execPath, [resolve(ROOT, 'eval/overnight.mjs'), '--manifest', auth], { cwd: root, timeoutMs: 9000 });
-    assert.equal(result.code, 1, result.output);
-    const s = json(join(out, 'state.json'));
-    assert.equal(s.reviewAttempt, 'b'); assert.equal(s.attempts.length, 2, 'review a cannot authorize an unreviewed rerun of b or launch before b is decided');
-  } finally { clearInterval(timer); }
+  const result = await supervise(process.execPath, [resolve(ROOT, 'eval/overnight.mjs'), '--manifest', auth], { cwd: root, timeoutMs: 55000 });
+  assert.equal(result.code, 0, result.output);
+  const s = json(join(out, 'state.json'));
+  assert.deepEqual(s.decisions.filter(d => ['a', 'b'].includes(d.attempt)).map(d => [d.attempt, d.action]), [['a', 'retry'], ['b', 'retry']]);
+  assert.equal(s.reviewAttempt, null); assert.equal(s.cases.filter(c => c.cycles === 2 && c.executionPassed).length, 2);
 });
 for (const fault of ['probe-load', 'probe-init', 'probe-bind', 'probe-transport', 'probe-evidence-io', 'note-eio', 'probe-bad-json', 'probe-wrong-state']) {
   test(`long ${fault}: execution errors cannot masquerade as low-quality successful execution`, { timeout: 45000 }, async () => {
