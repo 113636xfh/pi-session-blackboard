@@ -3,7 +3,7 @@
   "description": "Synthetic wiring-smoke tasks, not scored benchmarks. One manual compaction plus resume; exactly the requested user rounds. No private session data is used or uploaded.",
   "loop": { "rounds": [2, 4], "laterRounds": [8, 16] },
   "fixed": {
-    "model": "in-process-fixed-stream (offline) or explicitly authorized strata/qwen3.8-flash-next-iq3_s",
+    "model": "in-process-fixed-stream (offline); legacy nightly live path is pinned to the former Qwen smoke model and is not eligible for the current Luna-only evaluation",
     "tools": { "common": ["write"], "notesArmsOnly": ["blackboard", "blackboard_recall"] },
     "tailBudget": 800,
     "reserveTokens": 4096,

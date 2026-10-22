@@ -3,11 +3,12 @@
 ## Status: 46/52 plan steps complete, release gate still open
 
 The default entry point is a **small wiring smoke**, not a public benchmark or a
-validated quality/cost comparison. A separately authorized 2026-10-20 05:00–11:00
-long-run entry is described below; its preparation does not complete step 47. The 2026-10-19 repair-and-retest run completed
-all three small cases; see [the full ledger](smoke-evidence-20261019.json), including
-all failed attempts (383.998 seconds cumulatively, 47 requests). Successful cases
-span repairs and are not a frozen-version performance comparison.
+validated quality/cost comparison. Earlier 2026-10-19 smoke evidence and the
+2026-10-20 authorization are historical only; neither grants current live
+permission. The 2026-10-19 repair-and-retest run completed all three small cases;
+see [the full ledger](smoke-evidence-20261019.json), including all failed attempts
+(383.998 seconds cumulatively, 47 requests). Successful cases span repairs and
+are not a frozen-version performance comparison.
 
 The smoke exercises a real pi 1.3.0 session, extension loading, actual fixture-file
 writes, persisted **manual** compactions, and post-compaction continuations.
@@ -36,15 +37,17 @@ node eval/nightly.mjs --arm native,board-fixed --cycles 16
 # Prints the actual launch plan; no worker/model request is started.
 node eval/nightly.mjs --dry-run
 
-# Live EXAMPLE ONLY: requires a current user-authorized window and budget.
-node eval/nightly.mjs --live --model strata/qwen3.8-flash-next-iq3_s --task path-fidelity --rounds 2 --total-seconds 600 --case-seconds 200
+# Historical example only: this legacy runner is pinned to the old Qwen smoke
+# model and is NOT permitted for the current Luna-only evaluation. Do not run it.
 ```
 
 `npm run eval` and `eval/run.mjs` delegate to this same supervisor.
 `eval/nightly.cmd` is an optional foreground shim, also offline by default.
-The default smoke creates **no scheduled job**. The separately authorized one-shot
-long-run job is documented below. Legacy `eval/live-check.mjs` refuses to execute:
-it had no hard supervisor and one unconditional PASS.
+The default smoke creates **no scheduled job**. A previously authorized one-shot long-run is complete and its authorization is
+expired; see the actual result ledger below. Legacy `eval/live-check.mjs` refuses
+to execute: it had no hard supervisor and one unconditional PASS. The generic
+nightly runner's historical live path is pinned to the former Qwen model and is
+not an eligible path for current Luna work.
 
 Environment variables do not enable live mode or enlarge the batch. Unknown
 arguments, invalid selectors, missing baselines, reused output paths, unavailable
@@ -62,8 +65,8 @@ Finalized schema-3 reports support case-level continuation:
 ```sh
 # Offline: failed groups rerun; successful groups are independently reverified.
 node eval/nightly.mjs --resume /absolute/path/to/report.json
-# Live continuation still needs explicit current authorization and the same model.
-node eval/nightly.mjs --resume /absolute/path/to/report.json --live --model strata/qwen3.8-flash-next-iq3_s
+# Historical legacy continuation only. It is not a live Luna runner and must not
+# be used under the current Luna-only authorization.
 ```
 
 The ancestor reports are immutable and hash-linked; every failed attempt consumes
@@ -174,16 +177,21 @@ The fixture deliberately scripts notes, native summaries and the resumed answer.
 A green offline check proves wiring, **not a model's memory quality**. It must
 never be quoted as a public-benchmark score.
 
-## Authorized long-run window (preparation, not a result)
+## Completed Luna diagnostic window (not an authorization)
 
-`eval/overnight.mjs` requires a separate immutable authorization manifest. It does
-not enlarge the default smoke or grant standing live permission. The current user
-explicitly authorized 2026-10-20 **05:00–11:00 local (+08:00)**, a new fixed six-hour
-window separate from the retained 383.998-second historical ledger.
+The immutable authorization manifest at
+`C:/Users/LittleSatellite233/AppData/Local/sbb-long-20261022-1951-luna/authorization.json`
+covered 2026-10-22 19:51:49 through 2026-10-23 01:51:49 local (+08:00), for
+`openai/gpt-6-luna` with `thinking=high` only. It is now expired. It prohibited
+Qwen, private uploads, pushes, deployments and requests after the hard deadline.
+The long-run runner requires an explicit manifest, verifies its scope/deadline and
+has no standing permission.
 
-- Step 47 only: native / pinned 0.2 / current 0.3, 2/4 then 8/16 persisted manual
-  compaction cycles. All arms must execute 2 and 4 before expansion. One agent
-  decision is required before proceeding to the next numbered plan step.
+- Step 47 matrix: native / pinned 0.2 / current 0.3, 2/4/8/16 persisted manual
+  compaction cycles. All 12 cells were attempted, but one 16-cycle board-prefix
+  cell remained an execution failure after one same-scope retry. Eleven cells
+  have verified execution; only one of those passed the exact-state quality
+  diagnostic. Therefore step 47 remains incomplete.
 - `long-state-v1` supplies initial facts once and only later changes: constraints,
   exact paths, task status, hypothesis validity, permission revocation and next
   action. The fixture is a controlled state-retention diagnostic, **not** a public
@@ -216,16 +224,15 @@ directories. A valid fingerprinted offline receipt is required before live work;
 a source/runtime change invalidates it. Mid-run repairs and retries retain their
 source versions and all attempts, and are not a frozen-version A/B result.
 
-## Public benchmark gate (not run)
+## Public benchmark gate (research only; not run)
 
-- CompactBench: `eval/vendor/cb` source commit
-  `b2bb0e2254010e7842801b9101e56fd9a6542615` declares package v0.2.0 and scorer
-  2.0.0. The remote's only `v0.1.0` tag does not contradict the newer source.
-  Pinning this exact commit resolves the version question; an adapter and an
-  eligible actual run are still missing.
-- MemoryAgentBench and LongMemEval diagnostics are not integrated.
-- CompAct-Bench is a protocol reference until a complete runnable harness is
-  verified, not an executable dependency inferred from its website.
+See [the detailed protocol and source findings](PUBLIC-BENCHMARK-PLAN.md).
+CompactBench is pinned to immutable commit
+`b2bb0e2254010e7842801b9101e56fd9a6542615` (package 0.2.0, scorer 2.0.0), but
+its native contract is not yet bridged to this pi extension. MemoryAgentBench and
+LongMemEval have candidate diagnostic slices; dataset pinning, licensing checks
+and leak-tested adapters remain open. CompAct-Bench is a protocol reference only.
 
-No public-benchmark numbers, completed plan steps 47–52, or release readiness
-are claimed here. Do not prefill live notes from gold labels.
+No public-benchmark scores or completed steps 47–52 are claimed here. Never
+prefill live notes from gold labels. The expired Luna authorization cannot be
+reused; any further model requests require fresh authorization.
