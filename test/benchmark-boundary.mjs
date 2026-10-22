@@ -90,11 +90,11 @@ test('real pi extension compacts an incrementally replayed prefix without seeing
   caseRecord.hiddenVerifierSidecar = { answer: 'GOLD_SIDE_CAR_881a' };
   const diagnosticPrompt = caseRecord.evaluation_items[0].prompt;
   const manager = SessionManager.create(dir, join(dir, 'sessions'));
-  const initial = buildCompactorBoundary(caseRecord, 11);
+  const initial = buildCompactorBoundary(caseRecord, 6);
   appendVisibleTurns(manager, initial, { timestamp: 1700000000000 });
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, allowModelNetwork: false, refreshOnCreate: false });
   const calls = [];
-  let probePhase = false;
+  let probePhase = false, memoryPass = 0, operationStart = 0;
   runtime.registerProvider('benchmark-offline', {
     api: 'openai-completions', baseUrl: 'http://127.0.0.1:1/not-used', apiKey: 'synthetic',
     models: [{ id: 'fixed', name: 'Fixed offline stream', input: ['text'], reasoning: false, contextWindow: 32000, maxTokens: 1024, cost: ZERO_COST }],
@@ -105,31 +105,41 @@ test('real pi extension compacts an incrementally replayed prefix without seeing
         : ['GOLD_SIDE_CAR_881a', 'GOLD_ANSWER_SECRET_881c', 'FUTURE_TURN_SECRET_a10f', diagnosticPrompt, 'critical_constraint', 'sandwiched', 'distractor'];
       for (const secret of forbidden) assert(!visible.includes(secret), `model context leaked ${secret}`);
       calls.push(context.messages);
-      const index = calls.length - 1;
-      assert(index < 5, 'unexpected extra model request');
+      const index = calls.length - operationStart - 1;
+      assert(index < 4, 'unexpected extra model request');
       const stream = createAssistantMessageEventStream();
       let content, stopReason = 'toolUse';
-      if (index === 0) {
+      if (probePhase) {
+        content = [{ type: 'text', text: 'Probe answered from compacted context only.' }];
+        stopReason = 'stop';
+      } else if (index === 0) {
         const allText = context.messages.map(textOf).join('\n');
-        const goal = /plan ([^.!?]+)\./.exec(allText)?.[1];
-        const constraint = /key rule: never ([^.]+)\./.exec(allText)?.[1];
-        assert(goal && constraint, 'fixture facts must be extracted only from visible transcript text');
-        content = [{ type: 'toolCall', id: 'benchmark-commit', name: 'blackboard', arguments: { action: 'commit', entries: [
-          { section: 'goal', text: `Goal: Plan ${goal}` },
-          { section: 'prefs', text: `Constraint: Never ${constraint}` },
-          { section: 'next', text: 'Propose phase one only after reviewing the constraint', taskState: 'todo' },
-        ] } }];
+        let entries;
+        if (memoryPass === 0) {
+          const goal = /plan ([^.!?]+)\./.exec(allText)?.[1];
+          const constraint = /key rule: never ([^.]+)\./.exec(allText)?.[1];
+          assert(goal && constraint, 'first notes must be extracted only from visible transcript text');
+          entries = [
+            { section: 'goal', text: `Goal: Plan ${goal}` },
+            { section: 'prefs', text: `Constraint: Never ${constraint}` },
+            { section: 'next', text: 'Propose phase one only after reviewing the constraint', taskState: 'todo' },
+          ];
+        } else {
+          assert.match(allText, /now propose the first phase of the project/i, 'new turn must be visible on the second pass');
+          entries = [{ section: 'findings', text: 'The latest visible user turn asks for the first project phase.' }];
+        }
+        content = [{ type: 'toolCall', id: `benchmark-commit-${memoryPass}`, name: 'blackboard', arguments: { action: 'commit', entries } }];
       } else if (index === 1) {
         content = [{ type: 'toolCall', id: 'benchmark-review', name: 'blackboard', arguments: { action: 'review' } }];
       } else if (index === 2) {
         const toolText = context.messages.filter(message => message.role === 'toolResult').map(textOf).join('\n');
         const credentialId = /review-[A-Za-z0-9]+/.exec(toolText)?.[0];
         assert(credentialId, 'review tool must supply a real credential');
-        content = [{ type: 'toolCall', id: 'benchmark-confirm', name: 'blackboard', arguments: { action: 'commit', review: {
+        content = [{ type: 'toolCall', id: `benchmark-confirm-${memoryPass}`, name: 'blackboard', arguments: { action: 'commit', review: {
           id: credentialId, constraintsChecked: true, executionChecked: true, goalChecked: true,
         } } }];
       } else {
-        content = [{ type: 'text', text: probePhase ? 'Probe answered from compacted context only.' : 'Memory review finished using only the visible transcript.' }];
+        content = [{ type: 'text', text: 'Memory review finished using only the visible transcript.' }];
         stopReason = 'stop';
       }
       const message = { role: 'assistant', api: model.api, provider: model.provider, model: model.id,
@@ -153,19 +163,38 @@ test('real pi extension compacts an incrementally replayed prefix without seeing
   session = created.session;
   const errors = [];
   await session.bindExtensions({ mode: 'print', onError: error => errors.push(String(error)) });
+  operationStart = calls.length;
   await session.prompt('Review only the currently visible conversation. Update the blackboard with sourced state, explicitly review this prefix, then stop.');
   assert.deepEqual(errors, []);
-  const before = calls.length;
+  const beforeFirstCompact = calls.length;
   await session.compact();
-  assert.equal(calls.length, before, 'blackboard takeover must not call a summarizer');
-  const compaction = manager.getBranch().find(entry => entry.type === 'compaction');
-  assert(compaction, 'pi persisted a real compaction node');
+  assert.equal(calls.length, beforeFirstCompact, 'blackboard takeover must not call a summarizer');
+  const firstCompaction = manager.getBranch().find(entry => entry.type === 'compaction');
+  assert(firstCompaction, 'pi persisted the first real compaction node');
+  assert.equal(firstCompaction.details?.generator, 'pi-session-blackboard');
+  assert.match(firstCompaction.summary, /skip code review/);
+  assert.match(firstCompaction.summary, /observability pass/);
+  assert(!firstCompaction.summary.includes('GOLD_ANSWER_SECRET_881c'));
+  assert(!firstCompaction.summary.includes('FUTURE_TURN_SECRET_a10f'));
+
+  const extended = buildCompactorBoundary(caseRecord, 11, { summary: firstCompaction.summary });
+  appendVisibleTurns(manager, extended, { fromTurnCount: 6, timestamp: 1700000001000 });
+  memoryPass = 1;
+  operationStart = calls.length;
+  await session.prompt('Review the newly visible continuation, update sourced state, review the added prefix, then stop.');
+  assert.deepEqual(errors, []);
+  const beforeSecondCompact = calls.length;
+  await session.compact();
+  assert.equal(calls.length, beforeSecondCompact, 'second board takeover must not call a summarizer');
+  const compactions = manager.getBranch().filter(entry => entry.type === 'compaction');
+  assert.equal(compactions.length, 2, 'both incremental prefixes must create real compaction nodes');
+  const compaction = compactions.at(-1);
   assert.equal(compaction.details?.generator, 'pi-session-blackboard');
   assert.match(compaction.summary, /skip code review/);
   assert.match(compaction.summary, /observability pass/);
   assert(!compaction.summary.includes('GOLD_ANSWER_SECRET_881c'));
   assert(!compaction.summary.includes('FUTURE_TURN_SECRET_a10f'));
-  assert.equal(calls.length, 4, 'the four requests were only the fixed memory-write/review flow');
+  assert.equal(calls.length, 8, 'each prefix used only the fixed memory-write/review flow');
 
   const mainFile = manager.getSessionFile();
   const hashFile = file => createHash('sha256').update(readFileSync(file)).digest('hex');
@@ -185,10 +214,11 @@ test('real pi extension compacts an incrementally replayed prefix without seeing
   await probeSession.bindExtensions({ mode: 'print', onError: error => errors.push(String(error)) });
   probeSession.setActiveToolsByName([]);
   probePhase = true;
+  operationStart = calls.length;
   await probeSession.prompt(diagnosticPrompt);
   const mainHashAfterProbe = hashFile(mainFile);
   assert.equal(mainHashAfterProbe, mainHashBeforeProbe, 'read-only probe must not mutate the main transcript');
   assert(!JSON.stringify(manager.getBranch()).includes(diagnosticPrompt));
   assert(!JSON.stringify(manager.getBranch()).includes('GOLD_ANSWER_SECRET_881c'));
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 9);
 });
