@@ -29,6 +29,11 @@ test('long inputs are incremental, never include future updates or diagnostic an
   assert(first.includes('NO_PRODUCTION_WRITES'));
   assert(first.includes('temporary fixture destination is unrelated'));
   for (const arm of arms) assert(longSystem(arm).includes('exact seven-field record'));
+  const fixedPrompt = longSystem(arms.find(arm => arm.id === 'board-fixed'));
+  assert.match(fixedPrompt, /show for the relevant section/);
+  assert.match(fixedPrompt, /id plus expectedRevision/);
+  assert.match(fixedPrompt, /never use supersedes/);
+  assert.match(longSystem(arms.find(arm => arm.id === 'board-prefix')), /unique substring of the full old note text/);
   assert(!first.includes('src/rollback/Restore.ts'));
   assert(!second.includes('src/parser/Tokens.ts'));
   assert(!second.includes('NO_PRODUCTION_WRITES'), 'old constraint is not re-given every cycle');
