@@ -36,3 +36,35 @@ export function buildCompactorBoundary(generatedCase, visibleTurnCount, previous
     previousArtifact: previousArtifact == null ? null : structuredClone(previousArtifact),
   };
 }
+
+/**
+ * Append only the newly visible portion of a sanitized prefix to a real pi
+ * SessionManager. The caller still owns model prompting and compaction; this
+ * function never sees scorer fields or triggers a model call.
+ */
+export function appendVisibleTurns(sessionManager, boundary, { fromTurnCount = 0, timestamp = Date.now(), provider = 'benchmark-replay', model = 'transcript' } = {}) {
+  const turns = boundary?.transcript?.turns;
+  if (!Array.isArray(turns)) throw new TypeError('boundary.transcript.turns must be an array');
+  if (!Number.isInteger(fromTurnCount) || fromTurnCount < 0 || fromTurnCount > turns.length) {
+    throw new RangeError('fromTurnCount must be a valid prior prefix length');
+  }
+  if (!sessionManager || typeof sessionManager.appendMessage !== 'function') {
+    throw new TypeError('a real SessionManager with appendMessage is required');
+  }
+  const entryIds = [];
+  for (const [offset, turn] of turns.slice(fromTurnCount).entries()) {
+    const at = timestamp + offset;
+    if (turn.role === 'user') {
+      entryIds.push(sessionManager.appendMessage({ role: 'user', content: turn.content, timestamp: at }));
+    } else if (turn.role === 'assistant') {
+      entryIds.push(sessionManager.appendMessage({
+        role: 'assistant', content: [{ type: 'text', text: turn.content }],
+        api: 'openai-completions', provider, model, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: 'stop', timestamp: at,
+      }));
+    } else {
+      throw new TypeError(`pi replay adapter does not support transcript role ${turn.role}`);
+    }
+  }
+  return entryIds;
+}
