@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { ROOT, MODEL, config, save } from '../eval/protocol.mjs';
-import { LONG_PROTOCOL, expectedState, longRound, longProbePrompt, evaluateLongAnswer } from '../eval/long-protocol.mjs';
+import { LONG_PROTOCOL, expectedState, longSystem, longRound, longProbePrompt, evaluateLongAnswer } from '../eval/long-protocol.mjs';
 import { assertAuthorizedSpec } from '../eval/long-auth.mjs';
 import { supervise } from '../eval/process.mjs';
 import { verifyLongCase } from '../eval/long-verify.mjs';
@@ -26,6 +26,8 @@ test('long inputs are incremental, never include future updates or diagnostic an
   const first = longRound(1, 0, arms[0], 'fixture/cycle-1/step-1.txt');
   const second = longRound(2, 0, arms[0], 'fixture/cycle-2/step-1.txt');
   assert(first.includes('NO_PRODUCTION_WRITES'));
+  assert(first.includes('temporary fixture destination is unrelated'));
+  for (const arm of arms) assert(longSystem(arm).includes('exact seven-field record'));
   assert(!first.includes('src/rollback/Restore.ts'));
   assert(!second.includes('src/parser/Tokens.ts'));
   assert(!second.includes('NO_PRODUCTION_WRITES'), 'old constraint is not re-given every cycle');
