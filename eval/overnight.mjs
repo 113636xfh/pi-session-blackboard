@@ -13,6 +13,10 @@ import { randomUUID } from 'node:crypto';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const read = path => JSON.parse(readFileSync(path, 'utf8'));
 const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; } };
+export function readyForExpansion(cases, arms) {
+  return [2, 4].every(cycles => arms.every(arm => cases.some(c => c.cycles === cycles && c.arm === arm
+    && c.executionPassed === true && c.qualityPassed === true)));
+}
 export async function runOvernight(path) {
   const authorization = resolve(path), m = readAuthorization(authorization);
   mkdirSync(m.out, { recursive: true });
@@ -72,8 +76,8 @@ export async function runOvernight(path) {
     const arms = preflight({ arms: m.arms });
     persist();
     for (const cycles of m.tiers) {
-      if (cycles > 4 && [2, 4].some(n => !m.arms.every(id => state.cases.some(c => c.cycles === n && c.arm === id && c.executionPassed)))) {
-        state.status = 'blocked-expansion'; state.reason = 'All selected arms must execute 2 and 4 cycles before 8/16'; persist(); return 1;
+      if (cycles > 4 && !readyForExpansion(state.cases, m.arms)) {
+        state.status = 'blocked-expansion'; state.reason = 'All selected arms must pass execution and quality at 2 and 4 cycles before 8/16'; persist(); return 1;
       }
       for (const arm of arms) {
         if (state.cases.some(c => c.cycles === cycles && c.arm === arm.id && (c.executionPassed || c.acknowledged))) continue;

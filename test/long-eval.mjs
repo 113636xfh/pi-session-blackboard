@@ -9,6 +9,7 @@ import { assertAuthorizedSpec } from '../eval/long-auth.mjs';
 import { supervise } from '../eval/process.mjs';
 import { verifyLongCase } from '../eval/long-verify.mjs';
 import { recoverableNoteError } from '../eval/long-errors.mjs';
+import { readyForExpansion } from '../eval/overnight.mjs';
 import { reconcileLongState, applyReviewDecision, pendingReviewAttempts } from '../eval/long-recovery.mjs';
 const root = mkdtempSync(join(tmpdir(), 'sbb long & paths '));
 const json = path => JSON.parse(readFileSync(path, 'utf8'));
@@ -39,6 +40,13 @@ test('long inputs are incremental, never include future updates or diagnostic an
   assert.equal(expectedState(16).path, 'src/rollback/Restore.ts');
   assert.equal(evaluateLongAnswer(16, '{}').passed, false);
   assert.equal(evaluateLongAnswer(16, 'not json').score, null);
+});
+test('8/16 expansion requires execution and quality passes at both 2 and 4 cycles for every arm', () => {
+  const matrix = [2, 4].flatMap(cycles => arms.map(arm => ({ cycles, arm: arm.id, executionPassed: true, qualityPassed: true })));
+  assert(readyForExpansion(matrix, arms.map(arm => arm.id)));
+  assert(!readyForExpansion(matrix.map((row, i) => i === 0 ? { ...row, qualityPassed: false } : row), arms.map(arm => arm.id)));
+  assert(!readyForExpansion(matrix.map((row, i) => i === 0 ? { ...row, executionPassed: false } : row), arms.map(arm => arm.id)));
+  assert(!readyForExpansion(matrix.slice(1), arms.map(arm => arm.id)));
 });
 test('authorization prevents early/late live work and enlarged scope', () => {
   const dir = join(root, 'auth'), path = authorization(dir, [2], 'live');
