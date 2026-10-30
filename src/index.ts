@@ -38,12 +38,47 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     if (!manager?.getBranch || !manager?.getSessionId) throw new Error('Session manager unavailable');
     const cwd = ctx.cwd ?? manager.getCwd?.() ?? process.cwd();
     const cfg = loadConfig(cwd);
+    const settingsEnabled = cfg.enabled;
     const branch = manager.getBranch() as BranchEntry[];
-    return { cfg, branch, manager, sessionId: manager.getSessionId(), projection: projector.read(branch) };
+    const projection = projector.read(branch);
+    // The manual knob is branch-local journal state: replaying the branch on a resume restores it,
+    // so a session left disabled stays disabled. It can only turn the plugin further off.
+    const gated = !!projection.gate?.disabled;
+    if (gated) cfg.enabled = false;
+    return { cfg, settingsEnabled, branch, manager, sessionId: manager.getSessionId(), projection, gated };
+  };
+  const disabledWhy = (s: ReturnType<typeof get>) => s.gated
+    ? 'manually off on this branch; /bb on re-enables'
+    : 'disabled in settings';
+  /** The knob must work while disabled, so it appends without the enabled gate. */
+  const setGate = (ctx: Ctx, disabled: boolean) => {
+    const s = get(ctx);
+    locks.acquire(s.cfg.boardDir, s.sessionId);
+    return commitWithCache(pi, s.manager, newEvent(s.projection, [{ type: 'gate', disabled }]), undefined, projector);
+  };
+  /**
+   * Toggling moves the two tool schemas in or out of the request's tool block, and the chat template
+   * renders that block at the head of the prompt, so the server re-prefills the whole context. This
+   * was measured, not inferred: with an otherwise pure-append message list, a tool-set change still
+   * reported cached_tokens = 0 (prefix-sentinel). The per-turn hint sits at the tail and is free.
+   */
+  const prefillCost = (ctx: Ctx) => {
+    const tokens = ctx.getContextUsage?.()?.tokens;
+    return typeof tokens === 'number' && tokens > 0
+      ? `The next request re-prefills the whole context (~${tokens.toLocaleString()} tokens): the two tools move in or out of the tool block, which the chat template renders at the head of the prompt.`
+      : 'The next request re-prefills the whole context: the two tools move in or out of the tool block, which the chat template renders at the head of the prompt.';
+  };
+  const confirmToggle = async (ctx: Ctx, action: 'off' | 'on') => {
+    const cost = prefillCost(ctx);
+    if (typeof ctx.ui?.confirm !== 'function') {
+      notify(ctx, `${cost} No confirmation dialog is available in this mode, so the change proceeds.`, 'warning');
+      return true;
+    }
+    return ctx.ui.confirm(`Blackboard ${action} on this branch`, `${cost} Turning it back with /bb ${action === 'off' ? 'on' : 'off'} costs another one. Continue?`);
   };
   const commit = (ctx: Ctx, event: ReturnType<typeof newEvent>) => {
     const s = get(ctx);
-    if (!s.cfg.enabled) throw new Error('Blackboard disabled; no state changed');
+    if (!s.cfg.enabled) throw new Error(`Blackboard disabled (${disabledWhy(s)}); no state changed`);
     locks.acquire(s.cfg.boardDir, s.sessionId);
     return commitWithCache(pi, s.manager, event, undefined, projector);
   };
@@ -76,7 +111,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
   };
   const execute = async (callId: string, params: any, ctx: Ctx) => {
     const s = get(ctx);
-    if (!s.cfg.enabled) throw new Error('Blackboard disabled; no state changed');
+    if (!s.cfg.enabled) throw new Error(`Blackboard disabled (${disabledWhy(s)}); no state changed`);
     switch (params.action) {
       case 'commit': {
         const operationId = params.operationId ?? callId;
@@ -289,7 +324,8 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     syncTools(ctx);
     const s = get(ctx);
     for (const hint of s.cfg.hints ?? []) notify(ctx, `session-blackboard settings: ${hint}`, 'warning');
-    if (!s.cfg.enabled) notify(ctx, 'session-blackboard is disabled: no tools, no notes, no compaction takeover.', 'info');
+    if (s.gated) notify(ctx, 'session-blackboard is manually disabled on this branch: no tools, no notes, no compaction takeover. This is journal state, so it stays disabled when the session is resumed; /bb on re-enables it.', 'info');
+    else if (!s.cfg.enabled) notify(ctx, 'session-blackboard is disabled: no tools, no notes, no compaction takeover.', 'info');
     else if (s.cfg.compaction === 'off') notify(ctx, 'session-blackboard: notes are available, compaction stays native (compaction="off").', 'info');
     else if (s.cfg.compaction === 'board') notify(ctx, 'session-blackboard: the board takes over compaction when its coverage is established.', 'info');
   });
@@ -301,13 +337,25 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     const value = message?.details?.generation;
     return typeof value === 'number' ? value : undefined;
   };
+  /** One short line, model-facing: past tool calls stay in history, so say the board is off. */
+  const DISABLED_NOTICE = '[session-blackboard] Disabled on this branch; do not call its tools.';
   pi.on('context', async (event, ctx) => {
     const s = get(ctx), repair = s.projection.repair;
-    if (!s.cfg.enabled) return;
+    const before = Array.isArray(event.messages) ? event.messages : [];
+    if (!s.cfg.enabled) {
+      // The tools left the request, but their earlier calls and this extension's own hints are still
+      // in the history. Drop our stale hints and state the disablement once, in one short line.
+      const messages = before.filter((message: any) => !(message?.role === 'custom' && typeof message.customType === 'string' && message.customType.startsWith(OWN_MESSAGE_PREFIX)));
+      const sawOwnTools = before.some((message: any) => message?.role === 'toolResult' && OWN_TOOLS.includes(message?.toolName));
+      if (!sawOwnTools && messages.length === before.length) return;
+      if (!messages.some((message: any) => message?.role === 'custom' && message?.content === DISABLED_NOTICE)) {
+        messages.push({ role: 'custom', customType: 'sbb-disabled', display: false, content: DISABLED_NOTICE, timestamp: Date.now() });
+      }
+      return { messages };
+    }
     // Only a request that actually reaches the provider proves the repair message was delivered.
     if (repair?.phase === 'queued') change(ctx, [{ type: 'repair', repair: { ...repair, phase: 'delivered' } }]);
     const generation = s.projection.generation;
-    const before = Array.isArray(event.messages) ? event.messages : [];
     // Old-generation extension hints are removed from the model-visible projection only; the
     // session log, user content and pending drafts are untouched.
     const messages = before.filter((message: any) => {
@@ -328,6 +376,8 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     if (changed) return { messages };
   });
   pi.on('tool_call', async (event, ctx) => {
+    // A disabled board still has its calls in history, so the model may try one again.
+    if (!get(ctx).cfg.enabled && OWN_TOOLS.includes(event.toolName)) return { block: true, reason: 'session-blackboard is disabled on this branch; /bb on re-enables it.' };
     if (dedicatedRepair(ctx) && !OWN_TOOLS.includes(event.toolName)) return { block: true, terminate: true, reason: 'Dedicated memory repair: pause task expansion; only blackboard tools are allowed for this bounded request.' };
   });
   const repairMessage = (projection: JournalProjection, branch: BranchEntry[], manager: Ctx, reasons: string[]) => {
@@ -525,7 +575,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     logAttempt('success', { reason: event?.reason, fromUs: ours, generation: replayBranch(s.manager.getBranch()).generation });
   });
   pi.registerCommand('bb', {
-    description: 'Session notes: show | commit <JSON> | skip | archive <ID> | reset. Markdown is export-only.',
+    description: 'Session notes: show | commit <JSON> | skip | archive <ID> | reset | on | off | status. Markdown is export-only.',
     handler: async (args, ctx) => {
       try {
         const match = /^\s*(\S+)?\s*([\s\S]*)$/.exec(args ?? '')!;
@@ -533,6 +583,35 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
         if (command === 'native') {
           change(ctx, [{ type: 'native', native: { at: new Date().toISOString(), ttlMs: 5 * 60 * 1000 } }]);
           notify(ctx, 'Next compaction runs pi\'s native summary (valid 5 minutes); the blackboard will not take over.');
+          return;
+        }
+        if (command === 'off' || command === 'disable') {
+          const s = get(ctx);
+          if (s.gated) { notify(ctx, `Already manually disabled on this branch${s.projection.gate?.at ? ` since ${s.projection.gate.at}` : ''}; /bb on re-enables.`); return; }
+          if (!s.cfg.enabled) { notify(ctx, 'Already disabled by settings; the knob changes nothing. Set session-blackboard.enabled to re-enable.', 'warning'); return; }
+          if (!(await confirmToggle(ctx, 'off'))) { notify(ctx, 'Cancelled; the blackboard stays enabled and the prompt prefix stays intact.'); return; }
+          const receipt = setGate(ctx, true);
+          syncTools(ctx);
+          notify(ctx, `Blackboard disabled on this branch at revision ${receipt.projection.revision}: no tools, no notes, no compaction takeover. The state is a journal event, so resuming or continuing this session stays disabled. /bb on re-enables.`);
+          return;
+        }
+        if (command === 'on' || command === 'enable') {
+          const s = get(ctx);
+          if (!s.gated) { notify(ctx, `Not manually disabled (settings enabled=${s.settingsEnabled}); nothing changed.`); return; }
+          if (!(await confirmToggle(ctx, 'on'))) { notify(ctx, 'Cancelled; the blackboard stays disabled on this branch.'); return; }
+          const receipt = setGate(ctx, false);
+          syncTools(ctx);
+          notify(ctx, `Blackboard re-enabled on this branch at revision ${receipt.projection.revision}.`);
+          return;
+        }
+        if (command === 'status') {
+          const s = get(ctx);
+          notify(ctx, JSON.stringify({
+            settingsEnabled: s.settingsEnabled, manuallyDisabled: s.gated, disabledSince: s.projection.gate?.at,
+            effectiveEnabled: s.cfg.enabled, revision: s.projection.revision, generation: s.projection.generation,
+            activeEntries: Object.values(s.projection.entries).filter(entry => entry.validity === 'active').length,
+            ownTools: pi.getActiveTools().filter(name => OWN_TOOLS.includes(name)),
+          }, null, 2));
           return;
         }
         if (command === 'cancel-repair') {

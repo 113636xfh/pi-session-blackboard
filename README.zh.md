@@ -119,7 +119,20 @@ Use blackboard show/recall or /bb; there is no default board file.
 |---|---|
 | `blackboard` 工具 | `commit`、`review`、`retain`、`show`、`archive`、`skip` |
 | `blackboard_recall` 工具 | 字面检索；`mode: current \| history \| session`、`limit`、`cursor` |
-| `/bb` | `show [section] [limit] [offset]`、`show <ID>`、`review`、`commit <JSON>`、`retain <ID> <revision>`、`archive <ID>`、`skip`、`reset`、`migrate [apply]`、`export --format markdown [--output "路径"] [--overwrite]`、`native`、`cancel-repair`、`debug` |
+| `/bb` | `show [section] [limit] [offset]`、`show <ID>`、`review`、`commit <JSON>`、`retain <ID> <revision>`、`archive <ID>`、`skip`、`reset`、`migrate [apply]`、`export --format markdown [--output "路径"] [--overwrite]`、`native`、`cancel-repair`、`debug`、`off`、`on`、`status` |
+
+`off` / `on` 是手动旋钮。它在本分支写入一条事件日志，因此不是进程内存：恢复或继续该会话时
+重放分支就仍是禁用状态，`session_start` 会重新播报这个状态。关闭期间是完全关闭——两个工具退出
+模型可见集合、不再抽取或注入笔记、压缩回退到 pi 原生摘要。`/bb` 本身仍然可用，所以 `/bb on`
+和 `/bb status` 照常工作。旋钮只能把插件往关闭方向调，永远不会覆盖 `session-blackboard.enabled: false`。
+
+两个方向都会先确认并说清代价：两个工具 schema 进出请求的工具块，而聊天模板把工具块渲染在
+prompt 最前部，所以下一次请求会重新 prefill 整段上下文（会显示当前 token 数）。这是实测而非推断：
+消息列表仍是纯追加时，仅工具集变化也会使 `cached_tokens = 0`。
+
+因为历史里的工具调用还在，模型仍可能去调黑板工具。关闭期间，模型可见投影会丢掉本插件自己的
+旧提示，并只带上一句短声明——`[session-blackboard] Disabled on this branch; do not call its tools.`——
+且不会逐轮叠加。来自历史的误调会被阻断并给出原因，而不是执行。
 
 分页是真实的：某一页没有命中时会明说「扫描尚未结束」并给出游标；只有扫描完成才允许说
 「没有匹配」。游标绑定分支叶节点与笔记版本，分支变化会让游标失效，而不是悄悄返回旧行。
@@ -129,7 +142,7 @@ Use blackboard show/recall or /bb; there is no default board file.
 
 - **权威来源**：会话 JSONL 里的 `sbb-event` 自定义条目。它们挂在会话树上，所以 `/tree`、
   fork、clone、reset 继承的都是真实祖先，被放弃的分支不会污染当前摘要。
-- **派生物**：不是必需的。投影缓存写入失败会回执「已提交、缓存待重建」，绝不引导重复提交。
+- **派生物**：每次读取都从事件重建投影，增量投影器复用未变化的前缀。磁盘上不写投影缓存，所以没有需要修复或需要信任的缓存。
 - **仅显式**：Markdown。`/bb export` 写出可校验的快照，手工修改永不会被导回，也不会自动
   维护会话 Markdown 黑板。
 
@@ -157,7 +170,7 @@ pi。
 
 | 键 | 默认 | 含义 |
 |---|---|---|
-| `enabled` | `true` | 设为 `false` 同时把两个工具从模型工具集中移除并停止注入 |
+| `enabled` | `true` | 设为 `false` 同时把两个工具从模型工具集中移除并停止注入。运行时等价物是 `/bb off`，作用于分支且恢复会话后仍生效 |
 | `compaction` | `"off"` | `off` / `board` / `digest`（仅迁移） |
 | `checkpointTurns` | `1` | 提醒间隔（回合） |
 | `summaryMaxChars` | `6000` | 渲染摘要的精确字符上限 |
@@ -165,8 +178,13 @@ pi。
 | `compactAssistMaxChars` | `4000` | 追加笔记块的上限 |
 | `compactionWarnTokens` | `32768` | 接近阈值的预警区间；`0` 关闭 |
 | `draftOnCommit` | `"deterministic"` | 哪些机械草稿行随提交一起落盘 |
+| `delivery` | `"next-turn"` | 提醒搭载下一个用户消息（`next-turn`）还是立即 steer |
+| `maxEntriesPerSection` | `40` | 每分节条目预算，超出后确定性归档 |
+| `maxEntryChars` | `300` | 单条提交笔记的字符上限 |
+| `maxDraftLines` | `60` | 单次 checkpoint 渲染的草稿行上限 |
+| `commitContextEntries` | `2` | 提交回执旁回显的已有条目数（`0` = 只回显新增） |
 | `debugLog` | `false` | 在 `sbb-debug` 条目中记录原因与计数（从不记录原文） |
-| `boardDir` | `<agentDir>/blackboard` | 锁、备份与投影缓存的位置 |
+| `boardDir` | `<agentDir>/blackboard` | 写者锁与迁移备份的位置 |
 
 已废弃的键（`mirrorToSession`、`seedFromPriorSummary`）会在每个会话提示一次，而不是悄悄
 失效。
@@ -185,7 +203,8 @@ pi。
 
 ```bash
 npm run typecheck
-npm test            # smoke + 可靠性 + 事件 + 导入 + 运行时 + 故障注入 + 平台 + 真实 SDK
+npm test            # smoke + 事件日志 + 可靠性 + 导入 + 运行时 + 故障注入 + 平台
+                    # + 真实 SDK 契约 + eval / long-eval / 基准边界闸门
 npm run test:known  # 曾经的失败复现，保留作回归护栏
 ```
 
@@ -202,6 +221,7 @@ npm run test:known  # 曾经的失败复现，保留作回归护栏
 - 手动压缩遇到缺口时这一版会退回原生：目前没有安全办法把补写回合交还给用户主动发起的
   压缩。
 - 不做跨进程合并，第二个写者会被拒绝。
+- `/bb off` 和 `/bb on` 各付一次全量重 prefill：工具块变了，而聊天模板把它渲染在 prompt 最前部。实测：两个方向都是 `cached_tokens = 0`。
 - 旧归档可以被检索，但永远是 unscoped；不会去推断它们属于哪条分支。
 
 - [契约差异：0.2 → 0.3](docs/CONTRACT.md)；`npm run release:check` 是一键本地检查入口。

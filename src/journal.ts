@@ -102,6 +102,12 @@ export function reduceEvent(previous: JournalProjection, event: JournalEvent): J
       case 'native':
         next.native = change.native ? structuredClone(change.native) : undefined;
         break;
+      case 'gate':
+        // The knob is journal state, so replaying the branch (resume, fork, rewind) restores it.
+        assert(typeof change.disabled === 'boolean', 'invalid gate');
+        if (change.disabled) next.gate = { disabled: true, at: event.at };
+        else delete next.gate;
+        break;
       default: throw new Error('Blackboard journal: unknown change');
     }
   }

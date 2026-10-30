@@ -153,7 +153,9 @@ export type JournalChange =
 	| { type: "draft"; draft: PendingDraft | null; cursor?: string; turns?: number }
 	| { type: "repair"; repair: RepairState }
 	| { type: "import"; sourceId: string; fingerprint: string }
-	| { type: "native"; native?: { at: string; ttlMs: number } };
+	| { type: "native"; native?: { at: string; ttlMs: number } }
+	/** Manual knob: branch-local disable, replayed with the branch. */
+	| { type: "gate"; disabled: boolean };
 export type JournalEvent = {
 	schema: 2; eventId: string; operationId: string; at: string;
 	baseRevision: number; changes: JournalChange[]; requestFingerprint?: string;
@@ -165,6 +167,8 @@ export type JournalProjection = {
 	imports: Record<string, string>; draft: PendingDraft | null; turns: number;
 	/** One-shot explicit native request, expired by its own timestamp. */
 	native?: { at: string; ttlMs: number }; cursor?: string; repair?: RepairState;
+	/** Manual knob, absent when not manually disabled. Branch-local: a resume replays it. */
+	gate?: { disabled: true; at: string };
 };
 
 /** Total number of lines across draft sections. */

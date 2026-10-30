@@ -128,3 +128,21 @@ test('fingerprints are deterministic across object property ordering', () => {
   assert.equal(fingerprint({ b: 2, a: 1 }), fingerprint({ a: 1, b: 2 }));
   assert.notEqual(fingerprint('A.ts'), fingerprint('a.ts'));
 });
+
+test('manual gate is branch-local journal state: replay restores it, an earlier fork does not', () => {
+  const off = event([{ type: 'gate', disabled: true }], 0, 'gate-off');
+  const disabled = reduceEvent(emptyProjection(), off);
+  assert.deepEqual(disabled.gate, { disabled: true, at: '2026-01-01T00:00:00Z' });
+  const note = event([{ type: 'put', entry: entry(), expectedRevision: 0 }], disabled.revision, 'note');
+  const withNote = reduceEvent(disabled, note);
+  assert.equal(withNote.gate.disabled, true, 'ordinary commits never clear the knob');
+  const on = reduceEvent(withNote, event([{ type: 'gate', disabled: false }], withNote.revision, 'gate-on'));
+  assert.equal(on.gate, undefined, 're-enabling leaves no gate key behind');
+  assert.equal(Object.keys(on.entries).length, 1, 'the knob never touches notes');
+
+  const node = (id, parentId, data) => ({ type: 'custom', customType: JOURNAL_TYPE, id, parentId, data });
+  assert.deepEqual(replayBranch([node('off', null, off), node('note', 'off', note)]), withNote, 'a resumed branch replays still disabled');
+  const fork = event([{ type: 'put', entry: entry('m-9', 'Fork taken before the knob'), expectedRevision: 0 }], 0, 'fork');
+  assert.equal(replayBranch([node('fork', null, fork)]).gate, undefined, 'a branch that never saw the knob stays enabled');
+  assert.throws(() => reduceEvent(emptyProjection(), event([{ type: 'gate' }], 0, 'bad-gate')), /invalid gate/);
+});

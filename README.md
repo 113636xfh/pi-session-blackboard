@@ -134,7 +134,27 @@ predictable.
 |---|---|
 | `blackboard` tool | `commit`, `review`, `retain`, `show`, `archive`, `skip` |
 | `blackboard_recall` tool | literal search; `mode: current \| history \| session`, `limit`, `cursor` |
-| `/bb` | `show [section] [limit] [offset]`, `show <ID>`, `review`, `commit <JSON>`, `retain <ID> <revision>`, `archive <ID>`, `skip`, `reset`, `migrate [apply]`, `export --format markdown [--output "path"] [--overwrite]`, `native`, `cancel-repair`, `debug` |
+| `/bb` | `show [section] [limit] [offset]`, `show <ID>`, `review`, `commit <JSON>`, `retain <ID> <revision>`, `archive <ID>`, `skip`, `reset`, `migrate [apply]`, `export --format markdown [--output "path"] [--overwrite]`, `native`, `cancel-repair`, `debug`, `off`, `on`, `status` |
+
+`off` / `on` is the manual knob. It writes one journal event on this branch, so it is
+not process memory: resuming or continuing the session replays the branch and stays
+disabled, and the state is reported again at `session_start`. While off the board is
+fully off — both tools leave the model-visible set, nothing is extracted or injected,
+and compaction falls back to pi's native summary. `/bb` itself stays reachable so
+`/bb on` and `/bb status` still work. The knob can only turn the plugin further off;
+it never overrides `session-blackboard.enabled: false`.
+
+Both directions ask first and state the price: moving the two tool schemas changes the
+tool block, which the chat template renders at the head of the prompt, so the next
+request re-prefills the whole context (the live token count is shown). This is measured,
+not assumed — with an otherwise pure-append message list, a tool-set change still
+reports `cached_tokens = 0`.
+
+Because past tool calls stay in the history, the model may still reach for a blackboard
+tool. While off, the model-visible projection drops this extension's own stale hints and
+carries exactly one short line — `[session-blackboard] Disabled on this branch; do not
+call its tools.` — never stacked across turns. A stale call is blocked with a stated
+reason instead of executing.
 
 Pagination is real: a page that finds nothing says *"the scan is not finished"* and
 hands out a cursor; only a finished scan may say "no match". A cursor is bound to
@@ -147,8 +167,9 @@ state — a superseded note never presents itself as current.
 - **Authoritative**: `sbb-event` custom entries in the session JSONL. They ride the
   session tree, so `/tree`, fork, clone and reset inherit exactly the real
   ancestry, and abandoned branches cannot leak into the current summary.
-- **Derived**: nothing is required. A projection-cache write failure reports
-  "committed; cache pending rebuild" and never invites a duplicate commit.
+- **Derived**: the projection is rebuilt from the events on every read, with an
+  incremental projector that reuses the unchanged prefix. No projection cache is
+  written to disk, so there is no cache to corrupt, rebuild, or trust.
 - **Explicit only**: Markdown. `/bb export` writes a verified snapshot; edits to it
   are never imported, and no session Markdown board is maintained.
 
@@ -181,7 +202,7 @@ session file and are ignored by 0.2. Nothing here upgrades your global pi.
 
 | key | default | meaning |
 |---|---|---|
-| `enabled` | `true` | `false` also removes both tools from the model's tool set and stops injection |
+| `enabled` | `true` | `false` also removes both tools from the model's tool set and stops injection. The runtime equivalent is `/bb off`, which is branch-local and survives resume |
 | `compaction` | `"off"` | `off` / `board` / `digest` (migration only) |
 | `checkpointTurns` | `1` | reminder cadence in turns |
 | `summaryMaxChars` | `6000` | exact character cap for the rendered summary |
@@ -189,8 +210,13 @@ session file and are ignored by 0.2. Nothing here upgrades your global pi.
 | `compactAssistMaxChars` | `4000` | cap for the appended notes block |
 | `compactionWarnTokens` | `32768` | near-threshold zone; `0` disables |
 | `draftOnCommit` | `"deterministic"` | which mechanical draft lines land with a commit |
+| `delivery` | `"next-turn"` | reminder rides the next user message (`next-turn`) or steers immediately |
+| `maxEntriesPerSection` | `40` | per-section budget before deterministic archival |
+| `maxEntryChars` | `300` | max characters per committed entry line |
+| `maxDraftLines` | `60` | max draft lines rendered into one checkpoint |
+| `commitContextEntries` | `2` | pre-existing entries echoed next to a commit (`0` = only the new ones) |
 | `debugLog` | `false` | record reasons/counts in `sbb-debug` entries (never raw content) |
-| `boardDir` | `<agentDir>/blackboard` | where locks, backups and the projection cache live |
+| `boardDir` | `<agentDir>/blackboard` | where the writer locks and migration backups live |
 
 Obsolete keys (`mirrorToSession`, `seedFromPriorSummary`) are reported once per
 session instead of silently doing nothing.
@@ -210,7 +236,8 @@ session instead of silently doing nothing.
 
 ```bash
 npm run typecheck
-npm test            # smoke + reliability + journal + import + runtime + faults + platform + real-SDK
+npm test            # smoke + journal + reliability + import + runtime + faults + platform
+                    # + real-SDK contract + eval / long-eval / benchmark-boundary gates
 npm run test:known  # previously-failing reproductions, kept as regression guards
 ```
 
@@ -231,6 +258,9 @@ called. CI runs Linux and Windows on Node 22.19.0 and 24.
 - Manual compaction with gaps falls back to native in this version: there is no
   safe way to hand a repair turn back to a user-initiated compaction.
 - Cross-process merging is not attempted; a second writer is refused.
+- `/bb off` and `/bb on` each cost one full re-prefill, because the tool block moves
+  and the chat template renders it at the head of the prompt. Measured: both
+  directions report `cached_tokens = 0`.
 - Legacy archives are searchable but stay unscoped forever; nothing infers their
   branch.
 

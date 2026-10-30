@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+- Add the manual knob: `/bb off`, `/bb on`, `/bb status`. The state is one journal
+  event on the current branch, not process memory, so resuming or continuing the
+  session replays it and stays disabled; `session_start` reports the state again.
+  While off the board is fully off — both tools leave the model-visible set, nothing
+  is extracted or injected, and compaction falls back to the native summary. `/bb`
+  itself stays reachable so the knob can be turned back. The knob can only turn the
+  plugin further off; it never overrides `session-blackboard.enabled: false`.
+- Both directions confirm first and state the price: the tool block moves, and the chat
+  template renders it at the head of the prompt, so the next request re-prefills the
+  whole context (live token count shown). Measured: a tool-set change with an otherwise
+  pure-append message list still reports `cached_tokens = 0`.
+- While off, the model-visible projection drops this extension's own stale hints and
+  carries exactly one short line — `[session-blackboard] Disabled on this branch; do not
+  call its tools.` — never stacked across turns; a stale call from history is blocked
+  with a stated reason.
+
 ## 0.3.0 — 2026-10-18
 
 Breaking. The storage model changed from a Markdown board to branch-local session

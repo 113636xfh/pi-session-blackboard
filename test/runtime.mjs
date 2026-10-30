@@ -22,10 +22,10 @@ export function harness(t) {
     appendEntry(customType, data) { branch.push({ id: `node-${branch.length}`, parentId: branch.at(-1)?.id ?? null, type: 'custom', customType, data }); },
   };
   extension(pi);
-  const notices = [], ctx = { cwd, sessionManager: manager, ui: { notify: (...args) => notices.push(args), confirm: async () => true } };
+  const notices = [], confirms = [], ctx = { cwd, sessionManager: manager, ui: { notify: (...args) => notices.push(args), confirm: async (...args) => { confirms.push(args); return true; } } };
   t.after(async () => { await hooks.session_shutdown?.({}, ctx); rmSync(cwd, { recursive: true, force: true }); });
   const invoke = (params, id = `call-${branch.length}`) => tools.blackboard.execute(id, params, undefined, undefined, ctx);
-  return { cwd, pi, tools, hooks, commands, branch, manager, ctx, invoke, notices, active: () => active, projection: () => replayBranch(branch) };
+  return { cwd, pi, tools, hooks, commands, branch, manager, ctx, invoke, notices, confirms, active: () => active, projection: () => replayBranch(branch) };
 }
 test('runtime commits and shows only event state without creating Markdown or default cache', async t => {
   const h = harness(t);
@@ -499,6 +499,68 @@ test('diagnostics record reasons and counts without raw content', async t => {
   const dump = h.notices.at(-1)[0];
   assert(dump.includes('"event":"native-fallback"') || dump.includes('deferred') || dump.includes('takeover'));
   assert(!dump.includes('Raw user secret text') && !dump.includes('Sensitive-but-unlogged note body'));
+});
+
+test('manual knob turns the board off on this branch and a resume keeps it off', async t => {
+  const h = harness(t);
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Goal written before the knob' }] });
+  await h.commands.bb.handler('off', h.ctx);
+  assert(h.confirms.some(([, message]) => /re-prefills the whole context/.test(message)), 'the toggle states the re-prefill cost before acting');
+  assert.deepEqual(h.active(), ['read'], 'own tools go offline while manually disabled');
+  assert.equal(h.projection().gate.disabled, true, 'the knob is a journal event, not process memory');
+  await assert.rejects(() => h.invoke({ action: 'show' }), /manually off on this branch/);
+  assert.equal(await h.hooks.before_agent_start({}, h.ctx), undefined, 'no checkpoint reminder while disabled');
+  await h.commands.bb.handler('status', h.ctx);
+  assert.match(h.notices.at(-1)[0], /"manuallyDisabled": true/);
+
+  // A resume: the previous writer releases, and a fresh instance replays the same persisted branch.
+  await h.hooks.session_shutdown({}, h.ctx);
+  let active = ['read'];
+  const tools2 = {}, hooks2 = {}, commands2 = {};
+  const pi2 = {
+    on: (name, fn) => { hooks2[name] = fn; }, registerTool: tool => { tools2[tool.name] = tool; }, registerCommand: (name, command) => { commands2[name] = command; },
+    getActiveTools: () => active, setActiveTools: next => { active = next; },
+    appendEntry: (customType, data) => { h.branch.push({ id: `node-${h.branch.length}`, parentId: h.branch.at(-1)?.id ?? null, type: 'custom', customType, data }); },
+  };
+  extension(pi2);
+  await hooks2.session_start({}, h.ctx);
+  assert.deepEqual(active, ['read'], 'the resumed session is still disabled');
+  assert(h.notices.some(([text]) => /manually disabled on this branch/.test(text)), 'resume states the knob out loud');
+  await assert.rejects(() => tools2.blackboard.execute('resumed', { action: 'show' }, undefined, undefined, h.ctx), /manually off on this branch/);
+
+  await commands2.bb.handler('on', h.ctx);
+  assert.deepEqual(active, ['read', 'blackboard', 'blackboard_recall'], 'the knob brings the tools back');
+  assert((await tools2.blackboard.execute('after-on', { action: 'show' }, undefined, undefined, h.ctx)).content[0].text.includes('Goal written before the knob'));
+
+  // Declining the confirmation changes nothing.
+  h.ctx.ui.confirm = async () => false;
+  await commands2.bb.handler('off', h.ctx);
+  assert((await tools2.blackboard.execute('after-cancel', { action: 'show' }, undefined, undefined, h.ctx)).content[0].text.includes('Goal written before the knob'), 'a cancelled knob leaves the board enabled');
+});
+
+test('a disabled board states itself once in the model context and blocks a stale call', async t => {
+  const h = harness(t);
+  await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Goal before the knob' }] });
+  const history = [
+    { role: 'user', content: 'Do the task' },
+    { role: 'toolResult', toolName: 'blackboard', toolCallId: 'c1', content: 'Committed v1' },
+    { role: 'custom', customType: 'sbb-review-needed', content: 'old checkpoint hint', details: { generation: 0 } },
+  ];
+  await h.commands.bb.handler('off', h.ctx);
+  const first = await h.hooks.context({ messages: structuredClone(history) }, h.ctx);
+  assert(first.messages.every(message => message.customType !== 'sbb-review-needed'), 'stale own hints leave the model-visible projection');
+  const notices = first.messages.filter(message => message.customType === 'sbb-disabled');
+  assert.equal(notices.length, 1, 'exactly one disabled notice');
+  assert(notices[0].content.split(/\s+/).length <= 10, `the notice stays within ten words: ${notices[0].content}`);
+  const second = await h.hooks.context({ messages: structuredClone(history) }, h.ctx);
+  assert.equal(second.messages.filter(message => message.customType === 'sbb-disabled').length, 1, 're-running the handler never stacks notices');
+  assert.equal(second.messages.length, first.messages.length, 'the disabled projection is stable turn to turn');
+  assert.equal((await h.hooks.tool_call({ toolName: 'blackboard' }, h.ctx)).block, true, 'a stale call from history is blocked');
+  assert.equal((await h.hooks.tool_call({ toolName: 'read' }, h.ctx)), undefined, 'other tools are untouched');
+
+  const h2 = harness(t);
+  writeFileSync(join(h2.cwd, '.pi/settings.json'), JSON.stringify({ 'session-blackboard': { boardDir: join(h2.cwd, 'boards'), enabled: false } }));
+  assert.equal(await h2.hooks.context({ messages: [{ role: 'user', content: 'Never used the board' }] }, h2.ctx), undefined, 'no notice when the model never saw the tools');
 });
 
 test('cooperating writers cannot share a session lock, and release does not delete another owner', t => {
