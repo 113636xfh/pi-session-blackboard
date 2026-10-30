@@ -130,9 +130,11 @@ Use blackboard show/recall or /bb; there is no default board file.
 prompt 最前部，所以下一次请求会重新 prefill 整段上下文（会显示当前 token 数）。这是实测而非推断：
 消息列表仍是纯追加时，仅工具集变化也会使 `cached_tokens = 0`。
 
-因为历史里的工具调用还在，模型仍可能去调黑板工具。关闭期间，模型可见投影会丢掉本插件自己的
-旧提示，并只带上一句短声明——`[session-blackboard] Disabled on this branch; do not call its tools.`——
-且不会逐轮叠加。来自历史的误调会被阻断并给出原因，而不是执行。
+因为历史里的工具调用还在，模型仍可能去调黑板工具。`/bb off` 后的第一个回合会带上一句短声明
+——`[session-blackboard] Disabled on this branch; do not call its tools.`——，它是一条真实的
+会话消息，且送达记录写进事件日志，因此不会重复：后续回合不会，恢复会话也不会。一次成功的
+压缩会退役它，新一代只会再拿到一条。关闭期间，模型可见投影还会丢掉本插件自己的旧提示。
+来自历史的误调会被阻断并给出原因，而不是执行。
 
 分页是真实的：某一页没有命中时会明说「扫描尚未结束」并给出游标；只有扫描完成才允许说
 「没有匹配」。游标绑定分支叶节点与笔记版本，分支变化会让游标失效，而不是悄悄返回旧行。

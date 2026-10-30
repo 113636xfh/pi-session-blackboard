@@ -509,7 +509,8 @@ test('manual knob turns the board off on this branch and a resume keeps it off',
   assert.deepEqual(h.active(), ['read'], 'own tools go offline while manually disabled');
   assert.equal(h.projection().gate.disabled, true, 'the knob is a journal event, not process memory');
   await assert.rejects(() => h.invoke({ action: 'show' }), /manually off on this branch/);
-  assert.equal(await h.hooks.before_agent_start({}, h.ctx), undefined, 'no checkpoint reminder while disabled');
+  assert.equal((await h.hooks.before_agent_start({}, h.ctx))?.message?.customType, 'sbb-disabled', 'the first turn after the knob carries the one-line notice');
+  assert.equal(await h.hooks.before_agent_start({}, h.ctx), undefined, 'never repeated, and no checkpoint reminder while disabled');
   await h.commands.bb.handler('status', h.ctx);
   assert.match(h.notices.at(-1)[0], /"manuallyDisabled": true/);
 
@@ -538,29 +539,53 @@ test('manual knob turns the board off on this branch and a resume keeps it off',
   assert((await tools2.blackboard.execute('after-cancel', { action: 'show' }, undefined, undefined, h.ctx)).content[0].text.includes('Goal written before the knob'), 'a cancelled knob leaves the board enabled');
 });
 
-test('a disabled board states itself once in the model context and blocks a stale call', async t => {
+test('the disabled notice is delivered once per generation and blocks a stale call', async t => {
   const h = harness(t);
   await h.invoke({ action: 'commit', entries: [{ section: 'goal', text: 'Goal before the knob' }] });
+  await h.commands.bb.handler('off', h.ctx);
+  const first = await h.hooks.before_agent_start({}, h.ctx);
+  assert.equal(first?.message?.customType, 'sbb-disabled', 'one notice on the first turn after the knob');
+  assert(first.message.content.split(/\s+/).length <= 10, `the notice stays within ten words: ${first.message.content}`);
+  assert.equal(h.projection().gateNotice.generation, 0, 'delivery is journal state, not a per-request flag');
+  for (let turn = 0; turn < 3; turn++) assert.equal(await h.hooks.before_agent_start({}, h.ctx), undefined, 'never repeated');
+
+  // The persisted notice stays visible for its generation; the old hints do not. Nothing is injected.
   const history = [
     { role: 'user', content: 'Do the task' },
     { role: 'toolResult', toolName: 'blackboard', toolCallId: 'c1', content: 'Committed v1' },
     { role: 'custom', customType: 'sbb-review-needed', content: 'old checkpoint hint', details: { generation: 0 } },
+    { role: 'custom', customType: 'sbb-disabled', content: first.message.content, details: { generation: 0 } },
   ];
-  await h.commands.bb.handler('off', h.ctx);
-  const first = await h.hooks.context({ messages: structuredClone(history) }, h.ctx);
-  assert(first.messages.every(message => message.customType !== 'sbb-review-needed'), 'stale own hints leave the model-visible projection');
-  const notices = first.messages.filter(message => message.customType === 'sbb-disabled');
-  assert.equal(notices.length, 1, 'exactly one disabled notice');
-  assert(notices[0].content.split(/\s+/).length <= 10, `the notice stays within ten words: ${notices[0].content}`);
-  const second = await h.hooks.context({ messages: structuredClone(history) }, h.ctx);
-  assert.equal(second.messages.filter(message => message.customType === 'sbb-disabled').length, 1, 're-running the handler never stacks notices');
-  assert.equal(second.messages.length, first.messages.length, 'the disabled projection is stable turn to turn');
+  const projected = await h.hooks.context({ messages: structuredClone(history) }, h.ctx);
+  assert(projected.messages.every(message => message.customType !== 'sbb-review-needed'), 'stale own hints leave the model-visible projection');
+  assert.equal(projected.messages.filter(message => message.customType === 'sbb-disabled').length, 1, 'the notice stays visible for its generation');
+  assert.equal(projected.messages.length, history.length - 1, 'the handler only removes; it never adds');
+
+  // A successful compaction retires it, and the next generation gets exactly one fresh line.
+  h.branch.push({ type: 'compaction', id: 'cut-1', parentId: h.branch.at(-1)?.id ?? null });
+  const after = await h.hooks.before_agent_start({}, h.ctx);
+  assert.equal(after?.message?.details?.generation, 1, 're-armed once for the new generation');
+  assert.equal(await h.hooks.before_agent_start({}, h.ctx), undefined, 'still one per generation');
+  const retired = await h.hooks.context({ messages: [
+    { role: 'custom', customType: 'sbb-disabled', content: first.message.content, details: { generation: 0 } },
+    { role: 'custom', customType: 'sbb-disabled', content: after.message.content, details: { generation: 1 } },
+  ] }, h.ctx);
+  assert.deepEqual(retired.messages.map(message => message.details?.generation), [1], 'the retired notice leaves the projection');
+
   assert.equal((await h.hooks.tool_call({ toolName: 'blackboard' }, h.ctx)).block, true, 'a stale call from history is blocked');
   assert.equal((await h.hooks.tool_call({ toolName: 'read' }, h.ctx)), undefined, 'other tools are untouched');
 
-  const h2 = harness(t);
-  writeFileSync(join(h2.cwd, '.pi/settings.json'), JSON.stringify({ 'session-blackboard': { boardDir: join(h2.cwd, 'boards'), enabled: false } }));
-  assert.equal(await h2.hooks.context({ messages: [{ role: 'user', content: 'Never used the board' }] }, h2.ctx), undefined, 'no notice when the model never saw the tools');
+  // A resume replays the delivery record: no second notice.
+  await h.hooks.session_shutdown({}, h.ctx);
+  let active = ['read'];
+  const hooks2 = {}, tools2 = {};
+  const pi2 = {
+    on: (name, fn) => { hooks2[name] = fn; }, registerTool: tool => { tools2[tool.name] = tool; }, registerCommand: () => {},
+    getActiveTools: () => active, setActiveTools: next => { active = next; },
+    appendEntry: (customType, data) => { h.branch.push({ id: `node-${h.branch.length}`, parentId: h.branch.at(-1)?.id ?? null, type: 'custom', customType, data }); },
+  };
+  extension(pi2);
+  assert.equal(await hooks2.before_agent_start({}, h.ctx), undefined, 'a resumed session does not repeat the notice');
 });
 
 test('cooperating writers cannot share a session lock, and release does not delete another owner', t => {

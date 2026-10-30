@@ -108,6 +108,11 @@ export function reduceEvent(previous: JournalProjection, event: JournalEvent): J
         if (change.disabled) next.gate = { disabled: true, at: event.at };
         else delete next.gate;
         break;
+      case 'gate-notice':
+        // One delivery per compaction generation: the notice is a real message, not a per-request hint.
+        assert(Number.isSafeInteger(change.generation) && change.generation >= 0, 'invalid gate notice generation');
+        next.gateNotice = { at: event.at, generation: change.generation };
+        break;
       default: throw new Error('Blackboard journal: unknown change');
     }
   }

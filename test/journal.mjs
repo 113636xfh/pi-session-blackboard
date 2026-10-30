@@ -146,3 +146,23 @@ test('manual gate is branch-local journal state: replay restores it, an earlier 
   assert.equal(replayBranch([node('fork', null, fork)]).gate, undefined, 'a branch that never saw the knob stays enabled');
   assert.throws(() => reduceEvent(emptyProjection(), event([{ type: 'gate' }], 0, 'bad-gate')), /invalid gate/);
 });
+
+test('the disabled notice is recorded once per generation and survives replay', () => {
+  const off = event([{ type: 'gate', disabled: true }], 0, 'gate-off');
+  const told = event([{ type: 'gate-notice', generation: 0 }], 1, 'told-0');
+  const toldAgain = event([{ type: 'gate-notice', generation: 1 }], 2, 'told-1');
+  let p = reduceEvent(emptyProjection(), off);
+  assert.equal(p.gateNotice, undefined, 'the knob alone never claims delivery');
+  p = reduceEvent(p, told);
+  assert.equal(p.gateNotice.generation, 0);
+  p = reduceEvent(p, toldAgain);
+  assert.equal(p.gateNotice.generation, 1, 'the newest generation is what a replay restores');
+  const branch = [
+    { type: 'custom', customType: JOURNAL_TYPE, id: 'a', parentId: null, data: off },
+    { type: 'custom', customType: JOURNAL_TYPE, id: 'b', parentId: 'a', data: told },
+    { type: 'custom', customType: JOURNAL_TYPE, id: 'c', parentId: 'b', data: toldAgain },
+  ];
+  assert.equal(replayBranch(branch).gateNotice.generation, 1, 'a resume replays the delivery record');
+  assert.equal(replayBranch(branch.slice(0, 2)).gateNotice.generation, 0);
+  assert.throws(() => reduceEvent(p, event([{ type: 'gate-notice', generation: 'x' }], 3, 'bad-notice')), /invalid gate notice generation/);
+});

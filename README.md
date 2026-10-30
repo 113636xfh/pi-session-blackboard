@@ -151,10 +151,13 @@ not assumed — with an otherwise pure-append message list, a tool-set change st
 reports `cached_tokens = 0`.
 
 Because past tool calls stay in the history, the model may still reach for a blackboard
-tool. While off, the model-visible projection drops this extension's own stale hints and
-carries exactly one short line — `[session-blackboard] Disabled on this branch; do not
-call its tools.` — never stacked across turns. A stale call is blocked with a stated
-reason instead of executing.
+tool. The first turn after `/bb off` carries one short line — `[session-blackboard]
+Disabled on this branch; do not call its tools.` — as a real session message, and the
+delivery is recorded in the journal, so it is never repeated: not on a later turn, and
+not after a resume. A successful compaction retires it, and the next generation gets
+exactly one fresh line. While off, the model-visible projection also drops this
+extension's own stale hints. A stale call is blocked with a stated reason instead of
+executing.
 
 Pagination is real: a page that finds nothing says *"the scan is not finished"* and
 hands out a cursor; only a finished scan may say "no match". A cursor is bound to

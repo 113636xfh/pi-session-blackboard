@@ -155,7 +155,9 @@ export type JournalChange =
 	| { type: "import"; sourceId: string; fingerprint: string }
 	| { type: "native"; native?: { at: string; ttlMs: number } }
 	/** Manual knob: branch-local disable, replayed with the branch. */
-	| { type: "gate"; disabled: boolean };
+	| { type: "gate"; disabled: boolean }
+	/** Records that the one-line disabled notice was handed to the model for this generation. */
+	| { type: "gate-notice"; generation: number };
 export type JournalEvent = {
 	schema: 2; eventId: string; operationId: string; at: string;
 	baseRevision: number; changes: JournalChange[]; requestFingerprint?: string;
@@ -169,6 +171,8 @@ export type JournalProjection = {
 	native?: { at: string; ttlMs: number }; cursor?: string; repair?: RepairState;
 	/** Manual knob, absent when not manually disabled. Branch-local: a resume replays it. */
 	gate?: { disabled: true; at: string };
+	/** Generation whose model already received the one-line disabled notice; re-armed by compaction. */
+	gateNotice?: { at: string; generation: number };
 };
 
 /** Total number of lines across draft sections. */

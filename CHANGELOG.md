@@ -14,10 +14,12 @@ All notable changes to this project are documented here.
   template renders it at the head of the prompt, so the next request re-prefills the
   whole context (live token count shown). Measured: a tool-set change with an otherwise
   pure-append message list still reports `cached_tokens = 0`.
-- While off, the model-visible projection drops this extension's own stale hints and
-  carries exactly one short line — `[session-blackboard] Disabled on this branch; do not
-  call its tools.` — never stacked across turns; a stale call from history is blocked
-  with a stated reason.
+- The first turn after `/bb off` carries one short line — `[session-blackboard] Disabled
+  on this branch; do not call its tools.` — as a real session message, with the delivery
+  recorded in the journal: never repeated on a later turn, and never repeated after a
+  resume. A successful compaction retires it and the next generation gets exactly one
+  fresh line. While off, the model-visible projection also drops this extension's own
+  stale hints; a stale call from history is blocked with a stated reason.
 
 ## 0.3.0 — 2026-10-18
 

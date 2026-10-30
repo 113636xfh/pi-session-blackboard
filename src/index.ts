@@ -330,27 +330,49 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     else if (s.cfg.compaction === 'board') notify(ctx, 'session-blackboard: the board takes over compaction when its coverage is established.', 'info');
   });
   pi.on('turn_end', async (event, ctx) => { collectTurn(event, ctx); });
-  pi.on('before_agent_start', async (_event, ctx) => { syncTools(ctx); return reminder(ctx); });
+  /** One short line, model-facing: past tool calls stay in history, so say the board is off. */
+  const DISABLED_NOTICE = '[session-blackboard] Disabled on this branch; do not call its tools.';
+  /** Records the delivery. Like the knob itself, it appends without the enabled gate. */
+  const gateMark = (ctx: Ctx, generation: number) => {
+    const s = get(ctx);
+    locks.acquire(s.cfg.boardDir, s.sessionId);
+    return commitWithCache(pi, s.manager, newEvent(s.projection, [{ type: 'gate-notice', generation }]), undefined, projector);
+  };
+  /**
+   * The notice is delivered once per compaction generation as a real session message, never re-added
+   * to every request: a projection-only hint is invisible to the next turn anyway, so the only thing
+   * it achieves is repeating itself forever. A successful compaction retires it and the next
+   * generation gets one fresh line; a stale call is still blocked with a stated reason.
+   */
+  const gateNotice = (ctx: Ctx) => {
+    const s = get(ctx);
+    if (!s.gated) return undefined;
+    const generation = s.projection.generation;
+    if (s.projection.gateNotice?.generation === generation) return undefined;
+    try { gateMark(ctx, generation); }
+    catch (error) { notify(ctx, `The disabled notice was sent but not recorded: ${error instanceof Error ? error.message : String(error)}; it may be sent again next turn.`, 'warning'); }
+    return { message: { customType: 'sbb-disabled', display: false, content: DISABLED_NOTICE, details: { generation } } };
+  };
+  pi.on('before_agent_start', async (_event, ctx) => { syncTools(ctx); const notice = gateNotice(ctx); return notice ?? reminder(ctx); });
   const noticesShown = new Set<string>();
   const OWN_MESSAGE_PREFIX = 'sbb-';
   const generationOf = (message: any): number | undefined => {
     const value = message?.details?.generation;
     return typeof value === 'number' ? value : undefined;
   };
-  /** One short line, model-facing: past tool calls stay in history, so say the board is off. */
-  const DISABLED_NOTICE = '[session-blackboard] Disabled on this branch; do not call its tools.';
   pi.on('context', async (event, ctx) => {
     const s = get(ctx), repair = s.projection.repair;
     const before = Array.isArray(event.messages) ? event.messages : [];
     if (!s.cfg.enabled) {
       // The tools left the request, but their earlier calls and this extension's own hints are still
-      // in the history. Drop our stale hints and state the disablement once, in one short line.
-      const messages = before.filter((message: any) => !(message?.role === 'custom' && typeof message.customType === 'string' && message.customType.startsWith(OWN_MESSAGE_PREFIX)));
-      const sawOwnTools = before.some((message: any) => message?.role === 'toolResult' && OWN_TOOLS.includes(message?.toolName));
-      if (!sawOwnTools && messages.length === before.length) return;
-      if (!messages.some((message: any) => message?.role === 'custom' && message?.content === DISABLED_NOTICE)) {
-        messages.push({ role: 'custom', customType: 'sbb-disabled', display: false, content: DISABLED_NOTICE, timestamp: Date.now() });
-      }
+      // in the history. Drop the stale hints; the one-line disabled notice is a real message and stays
+      // visible for the generation it was written for. Nothing is injected here.
+      const generation = s.projection.generation;
+      const messages = before.filter((message: any) => {
+        if (message?.role !== 'custom' || typeof message.customType !== 'string' || !message.customType.startsWith(OWN_MESSAGE_PREFIX)) return true;
+        return message.customType === 'sbb-disabled' && generationOf(message) === generation;
+      });
+      if (messages.length === before.length) return;
       return { messages };
     }
     // Only a request that actually reaches the provider proves the repair message was delivered.
