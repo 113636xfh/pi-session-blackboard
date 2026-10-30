@@ -177,52 +177,65 @@ The fixture deliberately scripts notes, native summaries and the resumed answer.
 A green offline check proves wiring, **not a model's memory quality**. It must
 never be quoted as a public-benchmark score.
 
-## Completed Luna diagnostic window (not an authorization)
+## Luna diagnostic runs and current execution gate
 
-The immutable authorization manifest at
+The original immutable manifest at
 `C:/Users/LittleSatellite233/AppData/Local/sbb-long-20261022-1951-luna/authorization.json`
-covered 2026-10-22 19:51:49 through 2026-10-23 01:51:49 local (+08:00), for
-`openai/gpt-6-luna` with `thinking=high` only. It is now expired. It prohibited
-Qwen, private uploads, pushes, deployments and requests after the hard deadline.
-The long-run runner requires an explicit manifest, verifies its scope/deadline and
-has no standing permission.
+covered a fixed six-hour `openai/gpt-6-luna`, `thinking=high` window and has expired.
+The user subsequently clarified that Luna may be used without a separate
+authorization request, while Qwen remains prohibited unless separately authorized.
+This permission does not lift the existing restrictions on private uploads, pushes,
+or deployments. Each run still uses an immutable manifest to pin its model, scorer,
+request/token/tail limits, output directory and reproducibility window; that
+manifest is an audit boundary, not an extra user-authorization requirement.
 
-- Step 47 matrix: native / pinned 0.2 / current 0.3, 2/4/8/16 persisted manual
-  compaction cycles. All 12 cells were attempted, but one 16-cycle board-prefix
-  cell remained an execution failure after one same-scope retry. Eleven cells
-  have verified execution; only one of those passed the exact-state quality
-  diagnostic. Therefore step 47 remains incomplete.
-- `long-state-v1` supplies initial facts once and only later changes: constraints,
+- The older `long-state-v1` matrix remains immutable. It did not pass its full
+  2/4/8/16 execution-and-quality gate. The exact-match `next` wording failure in
+  `long-20261022-1917-luna-board-id` is retained as a v1 result; it must not be
+  re-scored as v2.
+- The independent `long-state-v2` run at
+  `eval/results/long-20261022-1950-luna-v2-scoring/` passed all six 2/4-cycle
+  cells and the 8-cycle native cell. During 8-cycle board-prefix, the provider
+  returned `The ChatGPT user has reached their Subscription Sharing usage limit.`
+  The remaining five unique 8/16 cells are therefore **unresolved provider-blocked
+  cells**, not semantic quality failures. Its state is `stage-completed` with
+  `executionPassed=false`; step 47 remains incomplete. The 17 raw attempts and
+  accounting are summarized in that run's additive `step47-status.md`.
+- That older controller retried after the provider limit and proceeded to later
+  arms/tiers. The controller is now corrected to stop before any retry or next
+  worker on a recognized quota response, and the 16-cycle tier is gated on every
+  arm passing both execution and quality at 8 cycles. Offline regression tests
+  cover both protections; the forced offline preflight passed with receipt
+  `598fb231441451916d0b6a352a530ebe51e3870c61630fef06dad987f0ae3f3f`.
+- Do not make another Luna request until the provider limit resets. Then use a
+  fresh output directory/manifest; do not resume the old acknowledged failures.
+  Continue to exclude Qwen and do not switch credentials or providers to bypass
+  the limit.
+- `long-state-v2` supplies initial facts once and only later changes constraints,
   exact paths, task status, hypothesis validity, permission revocation and next
-  action. The fixture is a controlled state-retention diagnostic, **not** a public
-  benchmark, real coding trajectory, or observation of a model's hidden reasoning.
-- After each cut, a fork gets one read-only, tool-free diagnostic request. The main
-  session file is hash-checked unchanged. Diagnostic questions/answers are never
-  copied back into the main trajectory. Gold state is used only by the verifier.
+  action. It is a controlled state-retention diagnostic, **not** a public
+  benchmark, real coding trajectory, or observation of hidden model reasoning.
+  After each cut, a fork gets one read-only, tool-free diagnostic request. The main
+  session file is hash-checked unchanged; diagnostic answers and gold state are
+  not copied into the main trajectory.
 - Normal wrong answers / invalid JSON with a successful response are quality
   failures. Probe setup, transport, evidence-I/O and unclassified tool errors are
-  execution failures and stop before the next generation. Only enumerated note
-  validation mistakes can be corrected within the existing request/tool caps.
-- A failure pauses for agent inspection. Restarting does not clear pending reviews,
-  authorize retries, discard partial request counts or rerun passed cases. All
-  outstanding reviews must be decided before any new worker; unknown orphan exit
-  status requires explicit reconciliation and confirmation no worker remains.
-- A root `STOP` file stops new requests and aborts the active supervised process.
-  The controller also rejects new work outside the fixed deadline. This bounds the
-  client, not a guarantee that a remote GPU server cancelled disconnected work.
+  execution failures. Only enumerated note-validation mistakes can be corrected
+  within the existing request/tool caps. Missing/unknown values remain unknown,
+  never zeros or passes.
 
 `eval/schedule.ps1` registers a one-shot task using absolute `node.exe` and argv,
 not a `cmd /c` string. `eval/scheduled.mjs` logs and supervises that same controller.
 An actual scheduled **offline** launch passed all three two-cycle arms on this
 Windows host, including the project's ampersand path; the temporary proof task was
-removed. The authorized production task is `PiSessionBlackboardLong20261020`.
+removed. The historical production task is `PiSessionBlackboardLong20261020`.
 See [preparation evidence](OVERNIGHT-20261020.md).
 
 Read-only monitoring: `node eval/watch.mjs --manifest <absolute-authorization.json>
 --seconds 90` or `--until-start`. Local raw artifacts remain under ignored result
 directories. A valid fingerprinted offline receipt is required before live work;
-a source/runtime change invalidates it. Mid-run repairs and retries retain their
-source versions and all attempts, and are not a frozen-version A/B result.
+a source/runtime change invalidates it. Repairs and retries retain their source
+versions and all attempts, and are not a frozen-version A/B result.
 
 ## Public benchmark gate (research only; not run)
 

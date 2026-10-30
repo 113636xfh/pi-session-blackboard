@@ -9,7 +9,7 @@ import { assertAuthorizedSpec, readAuthorization } from '../eval/long-auth.mjs';
 import { supervise } from '../eval/process.mjs';
 import { verifyLongCase } from '../eval/long-verify.mjs';
 import { recoverableNoteError } from '../eval/long-errors.mjs';
-import { readyForExpansion } from '../eval/overnight.mjs';
+import { readyForExpansion, providerUsageLimit } from '../eval/overnight.mjs';
 import { reconcileLongState, applyReviewDecision, pendingReviewAttempts } from '../eval/long-recovery.mjs';
 const root = mkdtempSync(join(tmpdir(), 'sbb long & paths '));
 const json = path => JSON.parse(readFileSync(path, 'utf8'));
@@ -59,6 +59,26 @@ test('8/16 expansion requires execution and quality passes at both 2 and 4 cycle
   assert(!readyForExpansion(matrix.map((row, i) => i === 0 ? { ...row, qualityPassed: false } : row), arms.map(arm => arm.id)));
   assert(!readyForExpansion(matrix.map((row, i) => i === 0 ? { ...row, executionPassed: false } : row), arms.map(arm => arm.id)));
   assert(!readyForExpansion(matrix.slice(1), arms.map(arm => arm.id)));
+  const eight = arms.map(arm => ({ cycles: 8, arm: arm.id, executionPassed: true, qualityPassed: true }));
+  assert(readyForExpansion(eight, arms.map(arm => arm.id), [8]));
+  assert(!readyForExpansion(eight.map((row, i) => i === 0 ? { ...row, qualityPassed: false } : row), arms.map(arm => arm.id), [8]));
+});
+test('provider quota errors stop the controller before retry or another arm', { timeout: 100000 }, async () => {
+  const out = join(root, 'provider-limit-stop'), auth = join(out, 'authorization.json'), now = Date.now();
+  const manifest = { schema: 1, authorized: true, mode: 'offline', model: MODEL,
+    startAt: new Date(now - 1000).toISOString(), deadline: new Date(now + 120000).toISOString(),
+    tiers: [2], arms: ['native', 'board-fixed'], out, protocol: LONG_PROTOCOL, summaryMaxTokens: 2048, fixtureFault: 'provider-limit' };
+  save(auth, manifest);
+  const result = await supervise(process.execPath, [resolve(ROOT, 'eval/overnight.mjs'), '--manifest', auth], { cwd: root, timeoutMs: 90000 });
+  assert.equal(result.code, 1, result.output);
+  assert.match(result.output, /STOP_PROVIDER_LIMIT/);
+  const state = json(join(out, 'state.json'));
+  assert.equal(state.status, 'provider-limited'); assert.equal(state.attempts.length, 1);
+  assert.equal(state.attempts[0].modelCalls, 1); assert.equal(state.cases.length, 0);
+  assert.equal(state.reviewAttempt, null); assert.equal(state.providerLimitAttempt, state.attempts[0].id);
+  assert.equal(state.retryCounts, undefined, 'quota errors must not spend a retry');
+  assert(providerUsageLimit(state.attempts[0]));
+  assert(!state.attempts.some(attempt => attempt.arm === 'board-fixed'), 'no later arm may start after the limit');
 });
 test('authorization prevents early/late live work and enlarged scope', () => {
   const dir = join(root, 'auth'), path = authorization(dir, [2], 'live');

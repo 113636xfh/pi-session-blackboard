@@ -96,7 +96,11 @@ export async function worker(spec) {
           content: call ? [{ type: 'toolCall', id: `call-${cycle}-${round}-${step}`, ...call }] : [{ type: 'text', text }],
           stopReason: call ? 'toolUse' : 'stop', timestamp: Date.now(),
           usage: { input: Math.ceil(context.messages.map(textOf).join('').length / 4), output: 80, cacheRead: 0, cacheWrite: 0, totalTokens: 100, cost: ZERO_COST } };
-        if (spec.fixtureFault === 'model-error' || (spec.fixtureFault === 'probe-transport' && phase === 'resume')) { message.stopReason = 'error'; message.errorMessage = 'injected model failure'; }
+        if (spec.fixtureFault === 'model-error' || (spec.fixtureFault === 'probe-transport' && phase === 'resume') || spec.fixtureFault === 'provider-limit') {
+          message.stopReason = 'error';
+          message.errorMessage = spec.fixtureFault === 'provider-limit'
+            ? 'The ChatGPT user has reached their Subscription Sharing usage limit.' : 'injected model failure';
+        }
         if (spec.fixtureFault === 'probe-evidence-io' && phase === 'resume') mkdirSync(join(dir, 'requests', String(requests.at(-1).id), 'response.json'), { recursive: true });
         queueMicrotask(() => {
           stream.push({ type: 'start', partial: message });

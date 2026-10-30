@@ -13,9 +13,14 @@ import { randomUUID } from 'node:crypto';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const read = path => JSON.parse(readFileSync(path, 'utf8'));
 const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; } };
-export function readyForExpansion(cases, arms) {
-  return [2, 4].every(cycles => arms.every(arm => cases.some(c => c.cycles === cycles && c.arm === arm
+export function readyForExpansion(cases, arms, requiredCycles = [2, 4]) {
+  return requiredCycles.every(cycles => arms.every(arm => cases.some(c => c.cycles === cycles && c.arm === arm
     && c.executionPassed === true && c.qualityPassed === true)));
+}
+export function providerUsageLimit(attempt) {
+  const text = [attempt?.execution?.output, attempt?.execution?.setupError, attempt?.execution?.launchError, attempt?.reason]
+    .filter(value => typeof value === 'string').join('\n');
+  return /subscription sharing usage limit|insufficient_quota|usage limit|quota.{0,40}(?:exceed|limit)|billing.{0,40}(?:limit|quota)/i.test(text);
 }
 export async function runOvernight(path) {
   const authorization = resolve(path), m = readAuthorization(authorization);
@@ -40,6 +45,15 @@ export async function runOvernight(path) {
   const stopRequested = () => interrupted || existsSync(stopPath) || Date.now() >= m.end;
   const stopStatus = () => interrupted || existsSync(stopPath) ? 'stopped' : 'expired';
   const autoResolveReview = attempt => {
+    if (providerUsageLimit(attempt)) {
+      state.reviewAttempt = null;
+      state.status = 'provider-limited';
+      state.reason = 'Provider returned a usage/quota limit; stopped before retry or next worker.';
+      state.providerLimitAttempt = attempt.id;
+      attempt.providerLimited = true;
+      persist(); log(`STOP_PROVIDER_LIMIT ${attempt.id}; no retry or further model requests`);
+      return 'provider-limit';
+    }
     const key = `${attempt.cycles}-${attempt.arm}`;
     state.retryCounts ??= {};
     const retries = state.retryCounts[key] ?? 0;
@@ -60,7 +74,7 @@ export async function runOvernight(path) {
       const pending = state.attempts.find(a => a.id === state.reviewAttempt);
       if (!pending) throw new Error('Pending review has no accounted attempt');
       const action = autoResolveReview(pending);
-      if (action === 'stop') return false;
+      if (action === 'provider-limit' || action === 'stop') return false;
     }
     return !stopRequested();
   };
@@ -72,19 +86,22 @@ export async function runOvernight(path) {
       mkdirSync(resolve(ROOT, 'eval/results'), { recursive: true }); lockFd = openSync(lock, 'wx');
       writeFileSync(lockFd, JSON.stringify({ pid: process.pid, out: m.out, authorization, deadline: m.deadline }));
     }
-    if (!await drainReviews()) { state.status = Date.now() >= m.end ? 'expired' : 'stopped'; persist(); return 1; }
+    if (!await drainReviews()) { if (state.status !== 'provider-limited') state.status = Date.now() >= m.end ? 'expired' : 'stopped'; persist(); return 1; }
     const arms = preflight({ arms: m.arms });
     persist();
     for (const cycles of m.tiers) {
       if (cycles > 4 && !readyForExpansion(state.cases, m.arms)) {
         state.status = 'blocked-expansion'; state.reason = 'All selected arms must pass execution and quality at 2 and 4 cycles before 8/16'; persist(); return 1;
       }
+      if (cycles > 8 && !readyForExpansion(state.cases, m.arms, [8])) {
+        state.status = 'blocked-expansion'; state.reason = 'All selected arms must pass execution and quality at 8 cycles before 16'; persist(); return 1;
+      }
       for (const arm of arms) {
         if (state.cases.some(c => c.cycles === cycles && c.arm === arm.id && (c.executionPassed || c.acknowledged))) continue;
         let retry = true;
         while (retry && !stopRequested()) {
           retry = false;
-          if (!await drainReviews()) { state.status = Date.now() >= m.end ? 'expired' : 'stopped'; persist(); return 1; }
+          if (!await drainReviews()) { if (state.status !== 'provider-limited') state.status = Date.now() >= m.end ? 'expired' : 'stopped'; persist(); return 1; }
           if (state.cases.some(c => c.cycles === cycles && c.arm === arm.id && (c.executionPassed || c.acknowledged))) break;
           state.status = 'preflight'; persist();
           const receipt = m.mode === 'live' ? await ensurePreflight(m.arms) : { digest: fingerprint().digest, offline: true };
@@ -98,6 +115,7 @@ export async function runOvernight(path) {
           const spec = { protocol: m.protocol, authorization, task: 'long-state', live: m.mode === 'live', model: m.model,
             arm: currentArm, dir, cycles, rounds: 2, tail: 800, maxTokens: 2048, probeMaxTokens: 512, summaryMaxTokens: m.summaryMaxTokens, maxTools: 12, maxRequests: cycles * 20,
             thinkingLevel: m.thinkingLevel ?? 'off',
+            ...(m.mode === 'offline' && m.fixtureFault ? { fixtureFault: m.fixtureFault } : {}),
             caseSeconds: m.mode === 'live' ? Math.min(remaining / 1000, 120 + cycles * 240) : Math.min(remaining / 1000, 30 + cycles * 15) };
           const specPath = join(dir, 'spec.json'); save(specPath, spec);
           state.status = 'running'; state.active = { id, cycles, arm: arm.id, dir, sourceDigest: receipt.digest, startedAt: new Date().toISOString(), pid: null }; persist();
@@ -135,6 +153,7 @@ export async function runOvernight(path) {
           log(`END ${id} execution=${executionPassed} quality=${attempt.qualityPassed} calls=${attempt.modelCalls ?? 'unknown'}`);
           if (!executionPassed && !stopRequested()) {
             const decision = autoResolveReview(attempt);
+            if (decision === 'provider-limit') return 1;
             if (decision === 'retry') retry = true;
           }
           persist();
