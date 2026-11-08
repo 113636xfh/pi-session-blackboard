@@ -1,0 +1,109 @@
+{
+  "schema": 1,
+  "kind": "repair-and-retest-wiring-smoke-not-benchmark",
+  "modelLabel": "strata/qwen3.8-flash-next-iq3_s",
+  "physicalWeightBuildVerified": false,
+  "task": "path-fidelity",
+  "userRoundsPerCase": 2,
+  "manualCompactionsPerCompletedCase": 1,
+  "tailBudgetTokens": 800,
+  "reserveTokens": 4096,
+  "temperature": 0,
+  "maxOutputTokens": 512,
+  "authorizedCumulativeWallSeconds": 600,
+  "observedCumulativeWallSeconds": 383.998,
+  "costAccounting": {
+    "includesEarlierFailedNativeAttempt": true,
+    "includesAllFailedRepairAttempts": true,
+    "runtimeObservedRequests": 47,
+    "incompleteRuntimeRequests": 0,
+    "providerReportedInputTokens": 111145,
+    "providerReportedOutputTokens": 3628,
+    "providerReportedCacheReadTokens": 361235,
+    "providerReportedCacheWriteTokens": 0,
+    "independentlyMeteredGPUSeconds": null,
+    "monetaryCostCNY": null,
+    "note": "Wall time includes worker launch and shutdown, not measured GPU busy time. Provider token/cache counters are self-reported. Configured zero monetary rates do not establish free GPU use."
+  },
+  "attempts": [
+    {
+      "report": "eval/results/smoke-2026-10-19T11-54-42-540Z-42068/report.json",
+      "wallSeconds": 26.333,
+      "runtimeRequests": 2,
+      "outcome": "native unsolicited notes file blocked; other arms not started"
+    },
+    {
+      "report": "eval/results/smoke-2026-10-19T15-07-06-193Z-43912/report.json",
+      "wallSeconds": 89.198,
+      "runtimeRequests": 17,
+      "outcome": "native and prefix completed; fixed rejected unsourced user-origin notes"
+    },
+    {
+      "report": "eval/results/smoke-2026-10-19T15-11-03-320Z-51716/report.json",
+      "wallSeconds": 39.530,
+      "runtimeRequests": 8,
+      "outcome": "fixed completed first round, then model emitted incomplete JSON tool arguments"
+    },
+    {
+      "report": "eval/results/smoke-2026-10-19T15-13-52-331Z-49260/report.json",
+      "wallSeconds": 15.367,
+      "runtimeRequests": 2,
+      "outcome": "fixed rejected invented source reference"
+    },
+    {
+      "report": "eval/results/smoke-2026-10-19T15-16-02-759Z-27728/report.json",
+      "wallSeconds": 153.726,
+      "runtimeRequests": 7,
+      "outcome": "fixed rejected note ID supplied to the legacy text-substring supersedes field"
+    },
+    {
+      "report": "eval/results/smoke-2026-10-19T15-21-07-573Z-20412/report.json",
+      "wallSeconds": 59.844,
+      "runtimeRequests": 11,
+      "outcome": "fixed completed two writes, persisted blackboard takeover, and resumed without tool errors"
+    }
+  ],
+  "completedCases": [
+    {
+      "arm": "native",
+      "result": "eval/results/smoke-2026-10-19T15-07-06-193Z-43912/native/result.json",
+      "supervisedCaseWallSecondsRounded": 35.9,
+      "runtimeRequests": 6,
+      "nativeSummaryRequests": 1,
+      "blackboardTakeovers": 0,
+      "summaryChars": 1180,
+      "bothExactSourcePathsInSummaryAndResume": true,
+      "scope": "manual-compaction wiring smoke"
+    },
+    {
+      "arm": "board-prefix",
+      "sourceCommit": "08356132d6d9f92e80ebd023feb656dbc286716f",
+      "result": "eval/results/smoke-2026-10-19T15-07-06-193Z-43912/board-prefix/result.json",
+      "supervisedCaseWallSecondsRounded": 38.4,
+      "runtimeRequests": 9,
+      "nativeSummaryRequests": 0,
+      "blackboardTakeovers": 1,
+      "summaryChars": 1538,
+      "bothExactSourcePathsInSummaryAndResume": true,
+      "scope": "manual-compaction wiring smoke"
+    },
+    {
+      "arm": "board-fixed",
+      "result": "eval/results/smoke-2026-10-19T15-21-07-573Z-20412/board-fixed/result.json",
+      "supervisedCaseWallSecondsRounded": 59.8,
+      "runtimeRequests": 11,
+      "nativeSummaryRequests": 0,
+      "blackboardTakeovers": 1,
+      "summaryChars": 974,
+      "bothExactSourcePathsInSummaryAndResume": true,
+      "scope": "manual-compaction wiring smoke after protocol/schema-description repairs"
+    }
+  ],
+  "limitations": [
+    "Successful cases were collected across repair attempts with recorded per-run source and harness digests; this is not a simultaneous, frozen-version A/B performance comparison.",
+    "All cases use two user rounds and one manual compaction, not two or four compaction/reconstruction cycles.",
+    "Literal presence of the withdrawn token is not resurrection: native and prefix responses explicitly preserved its withdrawn qualifier.",
+    "No semantic accuracy score, success-rate estimate, speed advantage, cost advantage, public-benchmark score or release readiness is inferred.",
+    "Plan steps 47 through 52 remain open; no 4/8/16-cycle expansion is authorized by this small-batch run."
+  ]
+}

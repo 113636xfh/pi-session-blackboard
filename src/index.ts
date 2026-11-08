@@ -1,1147 +1,690 @@
-/**
- * pi-session-blackboard — session-level blackboard for the pi coding agent.
- *
- * Architecture (all bookkeeping is deterministic; zero background LLM calls):
- *
- *   agent_settled (per completed user turn)
- *     └─ normalize new branch entries
- *        └─ vcc-style deterministic extraction (goal/scope, prefs, files+symbols,
- *           commits, errors/issues, decisions, next-steps)  →  pending draft
- *           └─ [RESOLVED] marking of open issues when their files got modified
- *        └─ checkpoint due? (default: every turn)
- *             └─ before_agent_start injects the draft (display:false) with
- *                instructions to review it
- *   agent (inside its normal turn, no extra API call)
- *     └─ blackboard tool: commit (curated) | skip | show | archive
- *          └─ per-section overflow is rotated to an append-only archive file
- *          └─ optional compact digest mirrored into the session JSONL
- *             (searchable by pi-vcc's vcc_recall; consumable by future
- *              deterministic compaction)
- *
- * The board file lives at <boardDir>/<sessionId>.md and is a plain markdown
- * file — inspectable, greppable, commit-able, and readable by the agent with
- * its normal read tool at any time (e.g. after compaction).
- */
+/** pi 1.3 entry point. Session custom entries are authoritative; Markdown is export-only. */
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { compact } from '@earendil-works/pi-coding-agent';
+import { Type } from 'typebox';
+import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { loadConfig, computePressure, describePressure } from './config.js';
+import { normalizeBranch, extractAll } from './extract.js';
+import { defaultState } from './state.js';
+import { selectDraftLines, hasSummaryContext } from './board.js';
+import { renderSummary } from './summary.js';
+import { planImport } from './summary-import.js';
+import { boardPath } from './paths.js';
+import { inspectLegacy, migrateLegacy } from './migration.js';
+import { renderSnapshot, exportMarkdown, exportOptions } from './export.js';
+import { resolve } from 'node:path';
+import { BranchProjector, replayBranch, toBoard, planCommit, newEvent, fingerprint, reduceEvent, nativeRequestFresh, type CommitInput } from './journal.js';
+import { commitWithCache, WriterLocks } from './storage.js';
+import { makeOffer, validateReview, validateSources, draftCandidates, sourceRefs, checkReadiness, repairHeadroom } from './coverage.js';
+import { searchPage, readLegacyArchives, buildIndex } from './retrieval.js';
+import { SECTIONS, type BranchEntry, type JournalChange, type JournalProjection, type PendingDraft } from './types.js';
 
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
-import { compact, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type, type TLiteral } from "typebox";
+export const SUMMARY_GENERATOR = 'pi-session-blackboard';
+export const SUMMARY_SCHEMA = 2;
+/** Ownership is a generator+schema claim, never pi's generic `fromExtension` flag. */
+export const isOwnSummary = (details: unknown): details is { generator: string; schema: number } => {
+  const d = details as { generator?: unknown; schema?: unknown } | undefined;
+  return d?.generator === SUMMARY_GENERATOR && d?.schema === SUMMARY_SCHEMA;
+};
 
-import { renderAssistSection } from "./compact-assist.js";
-import {
-	formatRecall,
-	searchDigest,
-	searchDocument,
-	type RecallHit,
-} from "./recall.js";
-import { renderSummary } from "./summary.js";
-import type { ContextPressure, SbbConfig } from "./config.js";
-import { computePressure, describePressure, fmtTokens, loadConfig } from "./config.js";
-import { archiveDir, boardPath, debugPath, safeSid } from "./paths.js";
-import { defaultState, loadState, saveState } from "./state.js";
-import {
-	archiveEntry,
-	cleanEntryText,
-	commitEntries,
-	countAll,
-	countReal,
-	digest,
-	markResolved,
-	readBoardFile,
-	renderBoard,
-	renderCommitEcho,
-	selectDraftLines,
-	resetAll,
-	mergeSummaryIntoBoard,
-	writeBoard,
-} from "./board.js";
-import { extractAll, normalizeBranch } from "./extract.js";
-import {
-	SECTIONS,
-	countDraftLines,
-	type BranchEntry,
-	type DraftSections,
-	type PendingDraft,
-	type Section,
-	type SbbState,
-} from "./types.js";
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyCtx = any;
-
-const COMMIT_SECTIONS: Section[] = SECTIONS.filter((s) => s !== "archived");
-
-/** How long `/bb compact` keeps the native bypass armed before it expires. */
-const FORCE_NATIVE_TTL_MS = 5 * 60 * 1000;
-
-/** How many archive files one `blackboard_recall` reads (newest first). */
-const ARCHIVE_SCAN_MAX = 40;
-
+type Ctx = any;
+const OWN_TOOLS = ['blackboard', 'blackboard_recall'];
 export default function sessionBlackboard(pi: ExtensionAPI) {
-	const sessions = new Map<string, { cfg: SbbConfig; sessionId: string; cwd: string }>();
-
-	// --------------------------------------------------------------- helpers
-
-	const getSession = (ctx: AnyCtx): { cfg: SbbConfig; sessionId: string; cwd: string } => {
-		const sm = ctx?.sessionManager;
-		let sessionId = "";
-		// Project cwd, in priority order:
-		//  1. ctx.cwd — present in TUI sessions; ABSENT in SDK event contexts
-		//     (measured: preflight4 SDK session). Must NOT default to process.cwd()
-		//     before trying (2), or the branch fallback below is dead code.
-		//  2. the session branch's first "session" entry .cwd — the project cwd the
-		//     SessionManager recorded at creation (2-arg create(repo, sessionDir)).
-		//  3. process.cwd() — last resort only.
-		let cwd = typeof ctx?.cwd === "string" && ctx.cwd ? ctx.cwd : "";
-		let cwdSrc = ctx?.cwd ? "ctx" : "";
-		try {
-			sessionId = (sm?.getSessionId?.() as string | undefined) ?? "";
-		} catch {
-			/* ignore */
-		}
-		if (!sessionId || !sessions.has(sessionId)) {
-			try {
-				const branch = (sm?.getBranch?.() ?? []) as BranchEntry[];
-				const first = branch.find((e) => e?.type === "session");
-				if (!cwd && first && typeof first.cwd === "string" && first.cwd) {
-					cwd = first.cwd;
-					cwdSrc = "branch";
-				}
-				if (!sessionId && typeof first?.id === "string") sessionId = first.id;
-			} catch {
-				/* ignore */
-			}
-		}
-		if (!cwd) {
-			cwd = process.cwd();
-			cwdSrc = "process";
-		}
-		if (!sessionId) sessionId = "unknown";
-		let s = sessions.get(sessionId);
-		if (!s) {
-			s = { cfg: loadConfig(cwd), sessionId, cwd };
-			sessions.set(sessionId, s);
-			debug(s, { event: "cfg_loaded", cwd, cwdSrc, enabled: s.cfg.enabled });
-		}
-		return s;
-	};
-
-	const debug = (s: { cfg: SbbConfig; sessionId: string }, event: Record<string, unknown>) => {
-		if (!s.cfg.debugLog) return;
-		try {
-			const p = debugPath(s.cfg.boardDir, s.sessionId);
-			mkdirSync(join(s.cfg.boardDir, "debug"), { recursive: true });
-			appendFileSync(p, `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
-		} catch {
-			/* ignore */
-		}
-	};
-
-	const mirror = (s: { cfg: SbbConfig; sessionId: string }, board: Parameters<typeof digest>[0], kind?: string) => {
-		if (!s.cfg.mirrorToSession) return;
-		try {
-			pi.appendEntry("sbb-snapshot", { ...(kind ? { kind } : {}), ...digest(board, s.sessionId) });
-		} catch {
-			/* ignore */
-		}
-	};
-
-	// ------------------------------------------------- adopting a prior summary
-	//
-	// Two triggers, one code path:
-	//  - `session_start`: the extension was enabled mid-session, so pi has
-	//    already summarised the earlier history into a compaction entry;
-	//  - `session_compact`: pi just summarised natively because the board was
-	//    too thin (or unreadable), or because the user asked for a native
-	//    compaction — that text is the only record left of the replaced messages.
-	// Either way the entries are MERGED into the board (deduped, capped per
-	// section, overflow archived), so the next compaction has something to work
-	// from. Curated entries are never removed by a merge; our own board summary
-	// is never merged back in.
-
-	const adoptSummaryText = (
-		s: { cfg: SbbConfig; sessionId: string },
-		ctx: AnyCtx,
-		summary: string,
-		reason: "session_start" | "native-compaction",
-	): void => {
-		if (!s.cfg.seedFromPriorSummary) return;
-		const res = mergeSummaryIntoBoard(s.cfg.boardDir, s.sessionId, s.cfg, summary);
-		if (!res.merged) {
-			debug(s, { event: "summary_not_merged", reason: res.reason, trigger: reason });
-			return;
-		}
-		mirror(s, readBoardFile(s.cfg.boardDir, s.sessionId), `merged:${reason}`);
-		debug(s, {
-			event: "summary_merged",
-			trigger: reason,
-			added: res.added,
-			deduped: res.deduped,
-			counts: res.counts,
-			archived: res.archived.length,
-		});
-		const st = loadState(s.cfg.boardDir, s.sessionId);
-		st.boardVersion += 1;
-		st.lastAdoption = { source: reason, at: new Date().toISOString(), total: res.added };
-		saveState(s.cfg.boardDir, s.sessionId, st);
-		const detail = Object.entries(res.counts)
-			.map(([k, n]) => `${k}:${n}`)
-			.join(" ");
-		ctx?.ui?.notify?.(
-			res.added > 0
-				? `session-blackboard merged a native compaction summary — ${res.added} new entries (${detail})${res.deduped ? `, ${res.deduped} already known` : ""}.`
-				: `session-blackboard merged a native compaction summary — nothing new (${res.deduped} lines already on the board).`,
-			"info",
-		);
-	};
-
-	/**
-	 * Adopt prior native summaries once per session, on whichever hook fires first.
-	 *
-	 * `session_start` is not guaranteed to run (measured: an RPC pi process never
-	 * fires it), so the same check also runs from the first processed turn and is
-	 * guarded by a state flag rather than by which event showed up.
-	 *
-	 * EVERY compaction in the branch is merged, oldest first, so a long session
-	 * that compacted several times does not lose the older summaries' facts.
-	 * Merging is idempotent (case-insensitive dedupe), so re-running is a no-op.
-	 */
-	const maybeAdoptPriorSummary = (s: { cfg: SbbConfig; sessionId: string }, ctx: AnyCtx): void => {
-		if (!s.cfg.seedFromPriorSummary) return;
-		const st = loadState(s.cfg.boardDir, s.sessionId);
-		if (st.priorSummaryChecked) return;
-		st.priorSummaryChecked = true;
-		saveState(s.cfg.boardDir, s.sessionId, st);
-		adoptPriorSummary(s, ctx, "session_start");
-	};
-
-	const adoptPriorSummary = (s: { cfg: SbbConfig; sessionId: string }, ctx: AnyCtx, reason: "session_start"): void => {
-		try {
-			const entries = (ctx?.sessionManager?.getEntries?.() ?? []) as Array<Record<string, unknown>>;
-			const summaries: string[] = [];
-			for (const e of entries) {
-				if (e?.type !== "compaction") continue;
-				const summary = typeof (e as { summary?: unknown }).summary === "string" ? (e as { summary: string }).summary : "";
-				if (summary.trim()) summaries.push(summary);
-			}
-			for (const summary of summaries) adoptSummaryText(s, ctx, summary, reason);
-		} catch {
-			/* no session manager / unreadable session */
-		}
-	};
-
-	/**
-	 * How close pi is to its own compaction trigger right now. Null when the
-	 * context window is unknown (no model yet) or the countdown is disabled.
-	 */
-	const pressureOf = (s: { cfg: SbbConfig; cwd: string }, ctx: AnyCtx): ContextPressure | null => {
-		try {
-			const usage = ctx?.getContextUsage?.();
-			if (!usage) return null;
-			const model = ctx?.model;
-			const modelKey = model?.provider && model?.id ? `${model.provider}/${model.id}` : undefined;
-			return computePressure(usage, s.cwd, modelKey, s.cfg.compactionWarnTokens);
-		} catch {
-			return null;
-		}
-	};
-
-	const renderCheckpoint = (draft: PendingDraft | null, cfg: SbbConfig, pressure?: ContextPressure | null): string => {
-		const parts: string[] = ["[session-blackboard checkpoint]"];
-		// How close compaction is. In the warn zone this line is an instruction,
-		// not a statistic: the next turn may be the last one before the board
-		// becomes the summary.
-		if (pressure && cfg.compactionWarnTokens > 0) {
-			const line = describePressure(pressure);
-			if (line) parts.push(line);
-		}
-		parts.push(
-			"A draft of the session blackboard was compiled deterministically (no LLM) from turns since the last checkpoint.",
-			"IMPORTANT — what you commit here IS the compaction summary. When this session runs out of context, pi replaces everything before the retained tail with your blackboard entries (no separate summarization model runs). Your future self reads these lines, not the conversation. Write them the way you would write a checkpoint summary for another LLM that has to continue this work:",
-			`  - goal: what is being asked, including scope changes and corrections;`,
-			`  - decisions: the choice AND why it beat the alternative;`,
-			`  - findings: key findings from exploration/experiments — non-obvious behavior, measured results, root causes, with the exact command, number or error;`,
-			`  - files: exact paths, and which of them changed;`,
-			`  - issues: blockers with the real error text and exit codes; resolved ones must be moved or marked resolved;`,
-			`  - next: the concrete next step, not "continue working";`,
-			`  - prefs: durable constraints and preferences the user stated.`,
-			...(draft?.experiments?.length
-				? [`Experiments detected this period: ${draft.experiments.join("; ")}. If any produced a key finding, commit one line per finding under findings (what was tested, the result, why it was non-obvious). If none were non-obvious, say nothing.`]
-				: []),
-			// What happens to the draft on the next commit — the agent must know which
-			// lines it has to retype and which it only has to reject.
-			cfg.draftOnCommit === "all"
-				? "The WHOLE draft below lands automatically with your next commit — do NOT retype accepted lines. Your job: cull the noise with dropDraft=[\"substring\"], and add or correct lines in `entries`."
-				: cfg.draftOnCommit === "deterministic"
-					? "The draft's deterministic lines (`MODIFIED …` / `COMMIT …`) land automatically with your next commit — do NOT retype them; reject one with dropDraft=[\"substring\"]. Every other draft line lands ONLY if you write it yourself in `entries`."
-					: "Nothing from the draft lands automatically — anything you want on the board must be written yourself in `entries`.",
-			`Review the draft: correct inaccuracies, delete noise (dropDraft), then commit what is worth keeping via the \`blackboard\` tool (action="commit", entries=[{section, text, supersedes?}]). Sections: ${COMMIT_SECTIONS.join(", ")}. Each text must be ONE line, factual and specific, max ${cfg.maxEntryChars} chars — timestamps are added automatically. Preserve exact file paths, function names, error messages and numbers.`,
-			"Keep the board dense, not chronological: one line per fact, newest state wins.",
-			`When a fact CHANGED, put it on the new line and set supersedes="<unique substring of the old line>": the old line is archived in the same call, so the summary can never show both versions.`,
-			"If nothing is worth keeping, call the tool with action=\"skip\".",
-			"--- draft ---",
-		);
-		const sections = draft?.sections ?? {};
-		let any = false;
-		for (const s of SECTIONS) {
-			const lines = sections[s] ?? [];
-			if (!lines.length) continue;
-			any = true;
-			parts.push(`## ${s}`);
-			parts.push(...lines.slice(0, cfg.maxDraftLines).map((l) => `- ${l}`));
-		}
-		if (!any) parts.push(draft ? "(empty draft)" : "(no new deterministic entries this round)");
-		parts.push("--- end draft ---");
-		return parts.join("\n");
-	};
-
-	const clearPending = (st: SbbState) => {
-		st.pendingDraft = null;
-		st.pendingCheckpoint = false;
-		st.draftInjectCount = 0;
-	};
-
-	// ------------------------------------------------------- per-turn pipeline
-
-	const processTurn = (ctx: AnyCtx) => {
-		const s = getSession(ctx);
-		if (!s.cfg.enabled) return;
-		const sm = ctx?.sessionManager;
-		let branch: BranchEntry[] = [];
-		try {
-			branch = (sm?.getBranch?.() ?? []) as BranchEntry[];
-		} catch {
-			return;
-		}
-
-		const st = loadState(s.cfg.boardDir, s.sessionId);
-		st.turnsSinceCheckpoint += 1;
-		maybeAdoptPriorSummary(s, ctx);
-
-		// Window of entries since the last processed cursor.
-		let startIdx = 0;
-		if (st.lastProcessedEntryId) {
-			const i = branch.findIndex((e) => e?.id === st.lastProcessedEntryId);
-			startIdx = i >= 0 ? i + 1 : 0; // unknown id (branch switch/fork) → rescan; extractors dedupe
-		}
-		const fresh = branch.slice(startIdx).filter((e) => e?.type === "message");
-		const lastId = branch[branch.length - 1]?.id;
-		if (typeof lastId === "string") st.lastProcessedEntryId = lastId;
-
-		if (fresh.length > 0) {
-			const blocks = normalizeBranch(fresh);
-			const board = readBoardFile(s.cfg.boardDir, s.sessionId);
-			const { draft, resolvedPaths, experiments } = extractAll(blocks, board, st);
-
-			if (!st.goalExtracted) st.goalExtracted = true;
-
-			if (resolvedPaths.length > 0) {
-				const n = markResolved(board, resolvedPaths);
-				if (n > 0) writeBoard(s.cfg.boardDir, s.sessionId, board);
-			}
-
-			if (countDraftLines(draft) > 0 || experiments.length > 0) {
-				const pd: PendingDraft = st.pendingDraft ?? {
-					generatedAt: new Date().toISOString(),
-					sections: {},
-				};
-				for (const [k, lines] of Object.entries(draft)) {
-					const sec = k as Section;
-					const existing = (pd.sections[sec] ?? []).map((x) => x.toLowerCase());
-					for (const l of lines) {
-						if (!existing.includes(l.toLowerCase())) {
-							(pd.sections[sec] ??= []).push(l);
-						}
-					}
-				}
-				if (experiments.length > 0) {
-					const prev = pd.experiments ?? [];
-					pd.experiments = [...prev, ...experiments.filter((e) => !prev.includes(e))].slice(-8);
-				}
-				pd.generatedAt = new Date().toISOString();
-				st.pendingDraft = pd;
-			}
-		}
-
-		// Checkpoint trigger. Normally every `checkpointTurns` user turns — but
-		// inside the near-compaction zone EVERY turn counts: the board may become
-		// the summary at the end of this one, and the countdown rides along.
-		const pressure = pressureOf(s, ctx);
-		const near = pressure?.near === true;
-		const due = st.turnsSinceCheckpoint >= s.cfg.checkpointTurns || near;
-		if (due) {
-			st.pendingCheckpoint = true;
-			// A near-compaction nudge is a standing reminder, not an unprocessed
-			// draft: it must not burn one of the 3 tolerated misses.
-			if (near) st.draftInjectCount = 0;
-			if (!st.pendingDraft && near) {
-				// Nothing deterministic to show, but the reminder still has to
-				// reach the agent — commit-worthy facts are exactly what extraction
-				// cannot see.
-				st.pendingDraft = { generatedAt: new Date().toISOString(), sections: {} };
-			}
-			if (s.cfg.delivery === "immediate") {
-				try {
-					pi.sendMessage(
-						{
-							customType: "sbb-checkpoint",
-							content: renderCheckpoint(st.pendingDraft, s.cfg, pressure),
-							display: false,
-						},
-						{ deliverAs: "steer", triggerTurn: true },
-					);
-					st.pendingCheckpoint = false;
-				} catch {
-					/* keep it queued for the next user turn */
-				}
-			}
-		}
-
-		saveState(s.cfg.boardDir, s.sessionId, st);
-		debug(s, {
-			event: "turn_processed",
-			freshEntries: fresh.length,
-			draftLines: countDraftLines(st.pendingDraft?.sections as DraftSections | undefined),
-			pendingCheckpoint: st.pendingCheckpoint,
-			nearCompaction: near,
-			remainingTokens: pressure?.remaining ?? null,
-		});
-	};
-
-	// --------------------------------------------------------------- hooks
-
-	pi.on("session_start", async (_e, ctx) => {
-		try {
-			const s = getSession(ctx);
-			s.cfg = loadConfig(s.cwd); // refresh after config edits / resume
-			if (s.cfg.enabled) {
-				ctx?.ui?.notify?.(`session-blackboard active — board: ${boardPath(s.cfg.boardDir, s.sessionId)}`, "info");
-				maybeAdoptPriorSummary(s, ctx);
-			}
-		} catch {
-			/* never break session start */
-		}
-	});
-
-	// pi summarised without us: either the board was too thin to be trusted as a
-	// summary, or the board could not be read/rendered. That summary is the only
-	// record of the replaced messages — adopt it, so the NEXT compaction can use
-	// the board instead of asking the model again.
-	pi.on("session_compact", async (e, ctx) => {
-		try {
-			const s = getSession(ctx);
-			// Unconditional entry log: distinguishes "handler never called" from
-			// "called but bailed early" in the debug trail.
-			debug(s, {
-				event: "session_compact_hook",
-				sessionId: s.sessionId,
-				cwd: s.cwd,
-				summaryLen: typeof (e as { compactionEntry?: { summary?: unknown } })
-					.compactionEntry?.summary === "string"
-					? ((e as { compactionEntry: { summary: string } }).compactionEntry.summary).length
-					: -1,
-			});
-			if (!s.cfg.enabled || !s.cfg.seedFromPriorSummary) return;
-			// When this extension itself produced the compaction (board-as-summary),
-			// the carried summary IS the board's own rendering — adopting it would
-			// parse the board back into itself and duplicate every entry.
-			if ((e as { fromExtension?: boolean }).fromExtension) {
-				debug(s, { event: "summary_not_adopted", reason: "board-generated", trigger: "native-compaction" });
-				return;
-			}
-			const entry = (e as { compactionEntry?: { summary?: unknown } }).compactionEntry;
-			const summary = typeof entry?.summary === "string" ? entry.summary : "";
-			if (!summary.trim()) {
-				debug(s, { event: "summary_not_adopted", reason: "empty-summary", trigger: "native-compaction" });
-				return;
-			}
-			adoptSummaryText(s, ctx, summary, "native-compaction");
-		} catch (err) {
-			// Never break compaction, but do not vanish silently either: a hook that
-			// throws here is indistinguishable from "adoption never worked".
-			try {
-				debug(getSession(ctx), {
-					event: "summary_adopt_error",
-					error: err instanceof Error ? err.message : String(err),
-				});
-			} catch {
-				/* ignore */
-			}
-		}
-	});
-
-	pi.on("agent_settled", async (_e, ctx) => {
-		try {
-			processTurn(ctx);
-		} catch (err) {
-			try {
-				const s = getSession(ctx);
-				debug(s, { event: "process_turn_error", error: err instanceof Error ? err.message : String(err) });
-			} catch {
-				/* ignore */
-			}
-		}
-	});
-
-	pi.on("before_agent_start", async (_e, ctx) => {
-		try {
-			const s = getSession(ctx);
-			// pi 0.84.x auto-activates all registered extension tools in SDK sessions
-			// (measured: probe5), so the kill flag must actively de-activate.
-			ensureBlackboardActive(s);
-			ensureBlackboardInactive(s);
-			const st = loadState(s.cfg.boardDir, s.sessionId);
-			if (st.pendingCheckpoint) {
-				// Fresh reading for this turn: the number must describe the context
-				// the agent is about to run in, not the one from last turn.
-				const pressure = pressureOf(s, ctx);
-				const near = pressure?.near === true;
-				if (st.draftInjectCount >= 3 && !near) {
-					try {
-						ctx?.ui?.notify?.(
-							"session-blackboard: pending draft unprocessed 3× — commit it via the blackboard tool, or run /bb skip",
-							"warning",
-						);
-					} catch {
-						/* ignore */
-					}
-					st.pendingCheckpoint = false;
-					saveState(s.cfg.boardDir, s.sessionId, st);
-					return;
-				}
-				const content = renderCheckpoint(st.pendingDraft, s.cfg, pressure);
-				st.pendingCheckpoint = false;
-				if (near) st.draftInjectCount = 0;
-				else st.draftInjectCount += 1;
-				saveState(s.cfg.boardDir, s.sessionId, st);
-				debug(s, {
-					event: "checkpoint_injected",
-					draftLines: countDraftLines(st.pendingDraft?.sections as DraftSections | undefined),
-					nearCompaction: near,
-					remainingTokens: pressure?.remaining ?? null,
-				});
-				return {
-					message: { customType: "sbb-checkpoint", content, display: false },
-				};
-			}
-		} catch {
-			/* never break the agent */
-		}
-	});
-
-	// ----------------------------------------------- compaction cooperation
-	//
-	// Two independent "cooperate, don't replace" behaviors:
-	//
-	// (1) `compaction: "digest"` — mirror a compact board digest into the
-	//     session JSONL right before compaction (vcc_recall-searchable;
-	//     consumable by future deterministic compaction).
-	//
-	// (2) `compactAssist` (temporary) — ASSIST native compaction: run the very
-	//     same summarization call the harness would make (the exported
-	//     compact() — identical model, prompt, retained tail) and APPEND a
-	//     size-capped deterministic board section to the LLM summary, so the
-	//     post-compaction context carries both the conversational summary AND
-	//     the curated durable facts it may have dropped.
-	//     Strictly best-effort: no model / empty board / auth failure /
-	//     call failure -> return undefined -> the untouched native flow runs
-	//     (with its own retry policy). Native compaction is never replaced.
-	pi.on("session_before_compact", async (e, ctx) => {
-		let s: { cfg: SbbConfig; sessionId: string; cwd: string };
-		try {
-			s = getSession(ctx);
-		} catch {
-			return;
-		}
-		if (!s.cfg.enabled) return;
-
-		try {
-			// (1) optional pre-compaction digest mirroring (unchanged)
-			if (s.cfg.compaction === "digest") {
-				const board = readBoardFile(s.cfg.boardDir, s.sessionId);
-				if (countAll(board) > 0) mirror(s, board, "pre-compaction");
-			}
-		} catch {
-			/* never break compaction */
-		}
-
-		// (1b) board-as-summary: the agent has been curating this board every
-		// `checkpointTurns` turns precisely so it can stand in for the summary.
-		// Returning it here skips pi's summarization call entirely; a thin
-		// board returns null and the native flow below runs untouched.
-		if (s.cfg.compaction === "board") {
-			// A one-shot native request (from `/bb compact`): the user wants pi's
-			// own summarization for this compaction. The summary it produces is
-			// merged back into the board by the session_compact hook below, so
-			// nothing is lost by skipping the board this once.
-			const forced = loadState(s.cfg.boardDir, s.sessionId);
-			// Armed for 5 minutes only: a cancelled compaction must not leave a
-			// native-bypass sitting in the state file for the rest of the session.
-			const age = typeof forced.forceNativeOnceAt === "number" ? Date.now() - forced.forceNativeOnceAt : Infinity;
-			if (forced.forceNativeOnce && age <= FORCE_NATIVE_TTL_MS) {
-				forced.forceNativeOnce = false;
-				forced.forceNativeOnceAt = undefined;
-				saveState(s.cfg.boardDir, s.sessionId, forced);
-				debug(s, { event: "board_summary_bypassed", reason: e.reason, why: "manual-native" });
-				return; // -> untouched native flow
-			}
-			if (forced.forceNativeOnce) {
-				forced.forceNativeOnce = false;
-				forced.forceNativeOnceAt = undefined;
-				saveState(s.cfg.boardDir, s.sessionId, forced);
-			}
-			try {
-				const board = readBoardFile(s.cfg.boardDir, s.sessionId);
-				const bp = boardPath(s.cfg.boardDir, s.sessionId);
-				const keptNote =
-					"pi keeps the most recent turns verbatim right after this summary (keepRecentTokens), so recent work is not lost — do not restate it here; a one-line forward pointer (\"next step: X\") is enough.";
-				const summary = renderSummary(board, {
-					maxChars: s.cfg.summaryMaxChars,
-					keptTailNote: keptNote,
-					boardFile: bp,
-					archiveDir: archiveDir(s.cfg.boardDir, s.sessionId),
-					recallTool: "blackboard_recall",
-				});
-				if (summary) {
-					mirror(s, board, "pre-compaction");
-					debug(s, { event: "board_summary", reason: e.reason, chars: summary.length, entries: countAll(board) });
-					return {
-						compaction: {
-							summary,
-							firstKeptEntryId: e.preparation.firstKeptEntryId,
-							tokensBefore: e.preparation.tokensBefore,
-						},
-					};
-				}
-				debug(s, { event: "board_summary_thin", reason: e.reason, entries: countAll(board) });
-			} catch (err) {
-				debug(s, { event: "board_summary_error", error: err instanceof Error ? err.message : String(err) });
-			}
-			return; // -> native flow
-		}
-
-		// (2) assist: native LLM summary + capped board section
-		if (!s.cfg.compactAssist) return;
-		const model = ctx?.model;
-		const registry = ctx?.modelRegistry;
-		if (!model || typeof registry?.getApiKeyAndHeaders !== "function") return; // -> native flow
-		let section: string | null = null;
-		try {
-			const board = readBoardFile(s.cfg.boardDir, s.sessionId);
-			section = renderAssistSection(board, s.cfg.boardDir, s.sessionId, s.cfg.compactAssistMaxChars);
-		} catch {
-			return; // -> native flow
-		}
-		if (!section) return; // empty board: nothing to assist with -> native flow
-		try {
-			const auth = await registry.getApiKeyAndHeaders(model);
-			if (!auth || auth.ok !== true) return; // -> native flow
-			const result = await compact(
-				e.preparation,
-				model,
-				auth.apiKey,
-				auth.headers as Record<string, string> | undefined,
-				e.customInstructions,
-				e.signal,
-				ctx?.thinkingLevel,
-				undefined, // no streamFn -> single non-streaming completion
-				auth.env,
-			);
-			debug(s, {
-				event: "compact_assist",
-				reason: e.reason,
-				outputTokens: result.usage?.output,
-				sectionChars: section.length,
-			});
-			return {
-				compaction: {
-					...result,
-					summary: `${result.summary}\n\n${section}`,
-				},
-			};
-		} catch (err) {
-			// Any failure -> undefined -> native compaction runs unchanged.
-			debug(s, { event: "compact_assist_error", error: err instanceof Error ? err.message : String(err) });
-			return;
-		}
-	});
-
-	// ------------------------------------------------------------------ tool
-
-	const sectionLiterals: TLiteral[] = COMMIT_SECTIONS.map((v) => Type.Literal(v) as TLiteral);
-
-	pi.registerTool({
-		name: "blackboard",
-		label: "Session Blackboard",
-		description:
-			"Maintain the session blackboard — durable, session-scoped notes (goal, decisions, findings, files, issues, next steps, preferences) that survive compaction and restarts. Commit reviewed entries (optionally superseding stale ones, optionally rejecting mechanical draft lines with dropDraft), skip a pending draft, show the board, or archive entries.",
-		promptSnippet: "Commit reviewed entries to, show, skip, or archive the session blackboard",
-		promptGuidelines: [
-			'When a "[session-blackboard checkpoint]" message appears, review the draft it contains, then call blackboard with action="commit" for the entries worth keeping (corrected as needed), or action="skip" if none are.',
-			"blackboard entries ARE the compaction summary: when this session runs out of context, pi replaces everything before the retained tail with these entries (no summarization model runs). Write them as a checkpoint summary for your future self — what was asked, decisions and why, what is in progress or blocked, the concrete next step, exact paths/function names/error text.",
-			"blackboard entries are single lines only; keep them factual and specific (what was decided, which file path, which error). Timestamps are added automatically.",
-			"After exploration or experiments yield a non-obvious result (a measured behavior, a root cause, a gotcha), commit it under findings — one line with the exact command, number or error.",
-			'A fact that CHANGED goes on the new line with supersedes="<unique substring of the old line>" — the old line is archived in the same call, so the summary never carries both versions. Committing a correction WITHOUT supersedes leaves the stale line in place and makes the summary contradict itself.',
-			"After compaction or when resuming a session, call blackboard with action=\"show\" (or read the board file) to restore durable context, and use blackboard_recall to search older entries by keyword.",
-			"A commit echoes back only the entries that landed plus the few lines before each — it is NOT the whole board. When you need the full board use action=\"show\"; when you need an older fact use blackboard_recall.",
-			"Mechanical draft lines the policy auto-accepts (by default the deterministic `MODIFIED …` / `COMMIT …` ones) land with your commit — do NOT retype them. To reject one, name a substring of it in dropDraft=[…] instead.",
-		],
-		parameters: Type.Object({
-			action: Type.Union([Type.Literal("commit"), Type.Literal("skip"), Type.Literal("show"), Type.Literal("archive")], {
-				description:
-					'commit: record reviewed entries (mechanical draft lines the policy auto-accepts land with the same call; dropDraft rejects the ones you do not want); skip: discard the pending draft; show: print the current board; archive: move one stale entry to the archive file',
-			}),
-			entries: Type.Optional(
-				Type.Array(
-					Type.Object({
-						section: Type.Union(sectionLiterals, {
-							description: `target section: ${COMMIT_SECTIONS.join(" | ")}`,
-						}),
-						text: Type.String({ description: "one line, factual and specific" }),
-						supersedes: Type.Optional(
-							Type.String({
-								description:
-									"unique substring of an existing entry this line REPLACES; the old line is archived in the same call. Use it whenever a fact changed.",
-							}),
-						),
-					}),
-					{ description: "entries to commit (action=commit)" },
-				),
-			),
-			target: Type.Optional(Type.String({ description: "action=archive: unique substring identifying the entry to archive" })),
-			dropDraft: Type.Optional(
-				Type.Array(Type.String(), {
-					description:
-						"action=commit: substrings of PENDING DRAFT lines to reject — they are dropped instead of auto-committed (case-insensitive, no need to retype the line)",
-				}),
-			),
-		}),
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		async execute(_toolCallId: string, params: any, _signal: AbortSignal, _onUpdate: unknown, ctx: AnyCtx) {
-			const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: {} });
-			const s = getSession(ctx);
-			const dir = s.cfg.boardDir;
-			const sidShort = safeSid(s.sessionId);
-
-			if (!s.cfg.enabled) {
-				return text("blackboard is disabled for this project (.pi/settings.json → session-blackboard.enabled=false); no action taken.");
-			}
-
-			try {
-				switch (params.action) {
-					case "commit": {
-						const raw: unknown[] = Array.isArray(params.entries) ? (params.entries as unknown[]) : [];
-						const entries = raw
-							.filter(
-								(e): e is { section: Section; text: string; supersedes?: unknown } =>
-									!!e &&
-									typeof e === "object" &&
-									typeof (e as { text?: unknown }).text === "string" &&
-									COMMIT_SECTIONS.includes((e as { section?: unknown }).section as Section),
-							)
-							.map((e) =>
-								typeof e.supersedes === "string" && e.supersedes.trim()
-									? { section: e.section, text: e.text, supersedes: e.supersedes }
-									: { section: e.section, text: e.text },
-							);
-						const st = loadState(dir, s.sessionId);
-						// One call, one review: the draft lines the policy auto-accepts land
-						// with THIS commit (the agent does not retype them — measured, retyping
-						// is exactly how the deterministic facts got lost), and `dropDraft`
-						// substrings cull the ones it rejects. Draft lines first, so the agent's
-						// own wording wins whenever both exist.
-						const drop: string[] = Array.isArray(params.dropDraft)
-							? (params.dropDraft as unknown[]).filter((x): x is string => typeof x === "string")
-							: [];
-						const draftPick = selectDraftLines(st.pendingDraft, s.cfg.draftOnCommit, drop);
-						if (entries.length === 0 && draftPick.selected.length === 0) {
-							return text(
-								"No valid entries provided. Call with entries=[{section, text}] (section: " +
-									COMMIT_SECTIONS.join("|") +
-									"), or action=\"skip\" to discard the pending draft.",
-							);
-						}
-						const { board, archivedFiles, committed, deduped, supersededFiles, supersedeMisses, added } = commitEntries(
-							dir,
-							s.sessionId,
-							s.cfg,
-							[...draftPick.selected, ...entries],
-						);
-						clearPending(st);
-						st.checkpointCount += 1;
-						st.turnsSinceCheckpoint = 0;
-						st.boardVersion += 1;
-						saveState(dir, s.sessionId, st);
-						mirror(s, board);
-						debug(s, {
-							event: "commit",
-							committed,
-							deduped,
-							archived: archivedFiles.length,
-							superseded: supersededFiles.length,
-							supersedeMisses: supersedeMisses.length,
-							draftAuto: draftPick.selected.length,
-							draftDropped: draftPick.dropped,
-							draftPolicy: s.cfg.draftOnCommit,
-						});
-						const autoLanded = new Set(draftPick.selected.map((d) => cleanEntryText(d.text, s.cfg.maxEntryChars)));
-						const autoCount = added.filter((a) => autoLanded.has(a.text)).length;
-						const bits: string[] = [];
-						if (autoCount > 0) bits.push(`${autoCount} auto-accepted from the mechanical draft`);
-						if (deduped > 0) bits.push(`${deduped} duplicate${deduped === 1 ? "" : "s"} skipped`);
-						const parts: string[] = [
-							`Committed ${committed} ${committed === 1 ? "entry" : "entries"}${bits.length ? ` (${bits.join(", ")})` : ""}. Blackboard v${st.boardVersion}.`,
-						];
-						if (draftPick.dropped > 0) parts.push(`Dropped ${draftPick.dropped} draft line(s) matching dropDraft.`);
-						const notAuto = draftPick.total - draftPick.selected.length - draftPick.dropped;
-						if (notAuto > 0) {
-							parts.push(
-								`${notAuto} draft line(s) did NOT land (draftOnCommit="${s.cfg.draftOnCommit}" leaves them to you) — the draft is now cleared; rewrite them in the next commit if they matter.`,
-							);
-						}
-						if (supersededFiles.length > 0) {
-							parts.push(
-								`Replaced entries archived → ${supersededFiles.join(", ")} (still searchable via blackboard_recall).`,
-							);
-						}
-						if (supersedeMisses.length > 0) {
-							parts.push(
-								`⚠ ${supersedeMisses.length} supersedes target(s) archived nothing — the stale line is probably still on the board: ${supersedeMisses
-									.map((m) => `"${m.target}" (${m.reason})`)
-									.join("; ")}. Retry with a longer unique substring, or use action="archive".`,
-							);
-						}
-						if (archivedFiles.length > 0) parts.push(`Rotated overflow to: ${archivedFiles.join(", ")}`);
-						// Receipt, not a board dump: the new lines (`+`) plus the
-						// `commitContextEntries` lines before each — enough to pick the next
-						// `supersedes` substring without re-paying for the whole board every
-						// commit. Everything else is one `show` / `blackboard_recall` away.
-						const echo = renderCommitEcho(
-							board,
-							added.map((a) => ({ ...a, auto: autoLanded.has(a.text) })),
-							s.cfg.commitContextEntries,
-						);
-						if (echo) {
-							parts.push(
-								`Board after commit — your entries (+) and auto-accepted draft lines (~), each preceded by its ${s.cfg.commitContextEntries} nearest older entries:\n${echo}`,
-							);
-							parts.push(`Full board: ${boardPath(dir, s.sessionId)} — use action="show" or blackboard_recall, do not re-read the file.`);
-						}
-						return text(parts.join("\n\n"));
-					}
-					case "skip": {
-						const st = loadState(dir, s.sessionId);
-						clearPending(st);
-						saveState(dir, s.sessionId, st);
-						debug(s, { event: "skip" });
-						return text("Pending blackboard draft discarded.");
-					}
-					case "show": {
-						const board = readBoardFile(dir, s.sessionId);
-						const rendered = renderBoard(board);
-						const out =
-							rendered.length > 6000
-								? `${rendered.slice(0, 6000)}\n…(truncated — full board at ${boardPath(dir, s.sessionId)})`
-								: rendered.trim() === ""
-									? "(board empty)"
-									: rendered;
-						return text(out);
-					}
-					case "archive": {
-						const target = typeof params.target === "string" ? params.target : "";
-						if (!target.trim()) return text("archive requires target=<unique substring of the entry>");
-						const { board, archived } = archiveEntry(dir, s.sessionId, target);
-						if (!archived) return text(`No single board entry matched "${target}". Use a more specific substring.`);
-						mirror(s, board);
-						debug(s, { event: "archive", file: archived });
-						return text(`Archived 1 entry → ${boardPath(dir, s.sessionId)} … file: ${archived}`);
-					}
-					default:
-						return text(`Unknown action: ${String(params.action)}`);
-				}
-			} catch (err) {
-				return text(`blackboard error: ${err instanceof Error ? err.message : String(err)}`);
-			}
-		},
-	});
-
-	// --------------------------------------------------------------- tool activation
-	//
-	// SDK sessions: two gates keep an extension tool hidden from the model.
-	// (1) If the SDK caller passes an explicit `tools: [...]` option, it is a STRICT
-	//     ALLOWLIST (sdk.js: allowedToolNames) — the constructor's _refreshToolRegistry
-	//     filters the extension tool out of the registry itself, so setActiveTools can
-	//     never surface it ("only tools in the registry can be enabled"). Runners must
-	//     therefore OMIT the `tools` option (default active set is still read/bash/
-	//     edit/write).
-	// (2) SDK sessions do not auto-activate newly registered extension tools (TUI
-	//     sessions do). So even with an open registry the tool stays inactive until
-	//     someone activates it — which is what the first before_agent_start does below
-	//     (that event fires in SDK sessions; session_start does not).
-	// Measured in the 13878 A/B run: arm A's model never saw the `blackboard` tool
-	// in its schema (0 tool calls, 0 unknown-tool errors).
-	//
-	// Fix: one-shot activation on the first before_agent_start — by then the runner
-	// has wired the pi.* actions (ExtensionRunner ctor) AND the constructor's refresh
-	// has already merged our tool into the registry, so setActiveTools can enable it.
-	// No-op when already active (TUI) or when the kill flag disables us (arm B).
-	const api = pi as unknown as {
-		refreshTools?: () => void;
-		getActiveTools?: () => string[];
-		setActiveTools?: (names: string[]) => void;
-	};
-	let toolActivationAttempted = false;
-	const ensureBlackboardActive = (s: { cfg: SbbConfig; sessionId: string }) => {
-		if (!s.cfg.enabled || toolActivationAttempted) return;
-		toolActivationAttempted = true;
-		try {
-			api.refreshTools?.(); // re-merge registry (no-op where actions pre-wired)
-			const active = api.getActiveTools?.() ?? [];
-			if (typeof api.setActiveTools === "function" && !active.includes("blackboard")) {
-				api.setActiveTools([...active, "blackboard"]);
-						debug(s, { event: "tool_activated", activeTools: api.getActiveTools?.() });
-			} else {
-						debug(s, { event: "tool_already_active" });
-			}
-		} catch (err) {
-					debug(s, { event: "tool_activation_error", error: err instanceof Error ? err.message : String(err) });
-		}
-	};
-	let toolDeactivationAttempted = false;
-	// Kill flag: since pi 0.84.x the framework auto-activates all registered
-	// extension tools in SDK sessions too (measured: probe5 — `blackboard` in
-	// getActiveTools() ~1s after load, before any extension call). A project-level
-	// enabled:false must therefore actively REMOVE the tool, or the "extension OFF"
-	// arm still exposes it to the model.
-	const ensureBlackboardInactive = (s: { cfg: SbbConfig; sessionId: string }) => {
-		if (s.cfg.enabled || toolDeactivationAttempted) return;
-		toolDeactivationAttempted = true;
-		try {
-			const active = api.getActiveTools?.() ?? [];
-			if (active.includes("blackboard") && typeof api.setActiveTools === "function") {
-				api.setActiveTools(active.filter((n) => n !== "blackboard"));
-				debug(s, { event: "tool_deactivated", activeTools: api.getActiveTools?.() });
-			} else {
-				debug(s, { event: "tool_already_inactive" });
-			}
-		} catch (err) {
-			debug(s, { event: "tool_deactivation_error", error: err instanceof Error ? err.message : String(err) });
-		}
-	};
-	// Defensive immediate attempt (no-op under current pi wiring, where the runner
-	// copies the pi.* actions into the runtime only AFTER extension module load).
-	try {
-		api.refreshTools?.();
-		const activeNow = api.getActiveTools?.() ?? [];
-		if (typeof api.setActiveTools === "function" && !activeNow.includes("blackboard")) {
-			api.setActiveTools([...activeNow, "blackboard"]);
-		}
-	} catch {
-		/* actions not wired yet — handled on first before_agent_start */
-	}
-
-	// --------------------------------------------------------------- command
-
-	pi.registerCommand("bb", {
-		description:
-			"Session blackboard: no args = status+board | now = force checkpoint on next turn | compact = force NATIVE compaction (its summary is merged into the board) | skip = discard pending draft | reset = wipe board+state (archive kept)",
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		handler: async (args: string, ctx: AnyCtx) => {
-			const s = getSession(ctx);
-			const dir = s.cfg.boardDir;
-			const cmd = (args ?? "").trim().toLowerCase();
-			const st = loadState(dir, s.sessionId);
-			const ui = ctx?.ui as
-				| { notify?: (msg: string, kind?: string) => void; confirm?: (title: string, msg: string) => Promise<boolean> }
-				| undefined;
-
-			try {
-				if (cmd === "reset") {
-					const ok = await ui?.confirm?.("Reset blackboard", "Delete this session's blackboard file and state? (archive files are kept)");
-					if (ok) {
-						resetAll(dir, s.sessionId);
-						ui?.notify?.("Blackboard reset.", "info");
-					}
-					return;
-				}
-				if (cmd === "compact") {
-					// The manual "native compaction" button. Whatever pi's own
-					// summarization writes afterwards is merged back into the board
-					// by the session_compact hook, so this costs a model call and
-					// still leaves the board denser than before.
-					st.forceNativeOnce = true;
-					st.forceNativeOnceAt = Date.now();
-					saveState(dir, s.sessionId, st);
-					try {
-						ctx?.compact?.({
-							onComplete: () => {
-								ui?.notify?.("Native compaction done — its summary was merged into the blackboard.", "info");
-							},
-							onError: (err: Error) => {
-								st.forceNativeOnce = false;
-								saveState(dir, s.sessionId, st);
-								ui?.notify?.(`Native compaction failed: ${err.message}`, "error");
-							},
-						});
-						ui?.notify?.("Running pi's native compaction…", "info");
-					} catch (err) {
-						st.forceNativeOnce = false;
-						saveState(dir, s.sessionId, st);
-						ui?.notify?.(`Could not trigger compaction: ${err instanceof Error ? err.message : String(err)}`, "error");
-					}
-					return;
-				}
-				if (cmd === "skip") {
-					st.pendingDraft = null;
-					st.pendingCheckpoint = false;
-					st.draftInjectCount = 0;
-					saveState(dir, s.sessionId, st);
-					ui?.notify?.("Pending draft discarded.", "info");
-					return;
-				}
-				if (cmd === "now") {
-					if (!st.pendingDraft) {
-						ui?.notify?.("No pending draft to process.", "warning");
-						return;
-					}
-					st.pendingCheckpoint = true;
-					saveState(dir, s.sessionId, st);
-					if (s.cfg.delivery === "immediate") {
-						try {
-							pi.sendMessage(
-								{
-									customType: "sbb-checkpoint",
-									content: renderCheckpoint(st.pendingDraft, s.cfg),
-									display: false,
-								},
-								{ deliverAs: "steer", triggerTurn: true },
-							);
-							ui?.notify?.("Checkpoint dispatched.", "info");
-						} catch {
-							ui?.notify?.("Could not dispatch immediately; will inject on your next message.", "warning");
-						}
-					} else {
-						ui?.notify?.("Checkpoint will be injected with your next message.", "info");
-					}
-					return;
-				}
-
-				// default: status + board (truncated)
-				const board = readBoardFile(dir, s.sessionId);
-				const pr = pressureOf(s, ctx);
-				const lines: string[] = [
-					`blackboard: ${boardPath(dir, s.sessionId)}`,
-					`v${st.boardVersion} | updated: ${board.header.updated ?? "never"} | entries: ${countReal(board)} (+${countAll(board) - countReal(board)} archive pointers) | turns since checkpoint: ${st.turnsSinceCheckpoint} | pending draft: ${
-						st.pendingDraft ? `${countDraftLines(st.pendingDraft.sections)} lines` : "none"
-					}`,
-					`compaction: ${s.cfg.compaction}${pr && pr.remaining !== null ? ` | ${fmtTokens(pr.remaining)} tokens left until pi's native trigger` : ""}`,
-					"",
-					"subcommands: /bb now (checkpoint on next turn) | /bb compact (force NATIVE compaction; its summary merges into this board) | /bb skip | /bb reset",
-					"",
-				];
-				const rendered = renderBoard(board).split("\n");
-				lines.push(...rendered.slice(0, 80));
-				if (rendered.length > 80) lines.push(`…${rendered.length - 80} more lines (full file: ${boardPath(dir, s.sessionId)})`);
-				ui?.notify?.(lines.join("\n"), "info");
-			} catch (err) {
-				ui?.notify?.(`bb error: ${err instanceof Error ? err.message : String(err)}`, "error");
-			}
-		},
-	});
-
-	// ------------------------------------------------------------- retrieval
-	//
-	// The board is the compaction summary, so it is also what the model must be
-	// able to search when the summary is not enough. Greps the live board, the
-	// rotated archive, and the sbb-snapshot digests mirrored into the session.
-
-	pi.registerTool({
-		name: "blackboard_recall",
-		label: "Blackboard Recall",
-		description:
-			"Search the session blackboard (live board, rotated archive, and session digests) for entries matching a keyword — paths, identifiers, error fragments. Use it when the compaction summary does not answer a question about earlier in this session.",
-		promptSnippet: "Search the session blackboard for earlier entries by keyword",
-		promptGuidelines: [
-			"Prefer blackboard_recall over re-reading the summary when you need a specific earlier fact (a path, an error, a decision that is not in the summary).",
-			"Search with a literal substring copied from the conversation, not a paraphrase.",
-			"Results are one line per match, tagged with where it came from (board · Section, archive/<file> · From: Section, snapshot/<i>@hh-mm-ss · Section) — grep again with a longer substring to narrow, or pass full=true only when you need to restore a whole board state.",
-			"Archive files are searched newest first (up to 40 of them); if the result says the scan was capped, narrow the query instead of raising the limit.",
-		],
-		parameters: Type.Object({
-			query: Type.String({ description: "substring to find (case-insensitive), e.g. a file path, function name or error text" }),
-			limit: Type.Optional(Type.Number({ description: "max matching lines (default 20, max 60)" })),
-			full: Type.Optional(
-				Type.Boolean({
-					description: "return whole snapshot digests instead of just the matching lines (only when restoring the full board state)",
-				}),
-			),
-		}),
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		async execute(_toolCallId: string, params: any, _signal: AbortSignal, _onUpdate: unknown, ctx: AnyCtx) {
-			const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: {} });
-			try {
-				const s = getSession(ctx);
-				if (!s.cfg.enabled) return text("blackboard is disabled for this project; nothing to search.");
-				const query = typeof params?.query === "string" ? params.query : "";
-				if (!query.trim()) return text('blackboard_recall needs a non-empty "query".');
-				const limit = Math.max(1, Math.min(60, Number(params?.limit) || 20));
-				const full = params?.full === true;
-
-				const hits: RecallHit[] = [];
-				// live board
-				try {
-					hits.push(...searchDocument(readFileSync(boardPath(s.cfg.boardDir, s.sessionId), "utf-8"), query, limit, "board"));
-				} catch {
-					/* no board file yet */
-				}
-				// rotated archive
-				let archiveNote = "";
-				if (hits.length < limit) {
-					try {
-						const ad = archiveDir(s.cfg.boardDir, s.sessionId);
-						// Newest first, and at most ARCHIVE_SCAN_MAX files: rotation writes one
-						// file per overflow (measured: 55 files after 60 commits), so reading
-						// the whole directory per query gets slower the longer the session runs.
-						const files = readdirSync(ad)
-							.filter((n) => n.endsWith(".md"))
-							.map((n) => ({ n, m: statSync(join(ad, n)).mtimeMs }))
-							.sort((a, b) => b.m - a.m);
-						if (files.length > ARCHIVE_SCAN_MAX)
-							archiveNote = `\n(archive: searched the ${ARCHIVE_SCAN_MAX} newest of ${files.length} files — narrow the query or grep ${ad})`;
-						for (const f of files.slice(0, ARCHIVE_SCAN_MAX)) {
-							if (hits.length >= limit) break;
-							hits.push(...searchDocument(readFileSync(join(ad, f.n), "utf-8"), query, limit - hits.length, `archive/${f.n}`));
-						}
-					} catch {
-						/* no archive */
-					}
-				}
-				// session digests (sbb-snapshot entries) — one hit per matching line,
-				// attributed to the digest field it came from; `full` dumps the blob.
-				if (hits.length < limit) {
-					try {
-						const entries = (ctx?.sessionManager?.getEntries?.() ?? []) as Array<Record<string, unknown>>;
-						entries.forEach((entry, i) => {
-							if (hits.length >= limit) return;
-							if (entry?.type !== "custom" || entry?.customType !== "sbb-snapshot") return;
-							const data = (entry.data ?? {}) as Record<string, unknown>;
-							if (full) {
-								hits.push(...searchDocument(JSON.stringify(data), query, limit - hits.length, `snapshot/${i}`));
-								return;
-							}
-							const at = typeof data.at === "string" ? data.at.slice(11, 19).replace(/:/g, "-") : "";
-							hits.push(...searchDigest(data, query, limit - hits.length, at ? `snapshot/${i}@${at}` : `snapshot/${i}`));
-						});
-					} catch {
-						/* no session manager */
-					}
-				}
-				debug(s, { event: "recall", query, hits: hits.length });
-				return text(formatRecall(hits, query) + archiveNote);
-			} catch (err) {
-				return text(`blackboard_recall failed: ${err instanceof Error ? err.message : String(err)}`);
-			}
-		},
-	});
+  const locks = new WriterLocks();
+  const projector = new BranchProjector();
+  const get = (ctx: Ctx) => {
+    const manager = ctx.sessionManager;
+    if (!manager?.getBranch || !manager?.getSessionId) throw new Error('Session manager unavailable');
+    const cwd = ctx.cwd ?? manager.getCwd?.() ?? process.cwd();
+    const cfg = loadConfig(cwd);
+    const settingsEnabled = cfg.enabled;
+    const branch = manager.getBranch() as BranchEntry[];
+    const projection = projector.read(branch);
+    // The manual knob is branch-local journal state: replaying the branch on a resume restores it,
+    // so a session left disabled stays disabled. It can only turn the plugin further off.
+    const gated = !!projection.gate?.disabled;
+    if (gated) cfg.enabled = false;
+    return { cfg, settingsEnabled, branch, manager, sessionId: manager.getSessionId(), projection, gated };
+  };
+  const disabledWhy = (s: ReturnType<typeof get>) => s.gated
+    ? 'manually off on this branch; /bb on re-enables'
+    : 'disabled in settings';
+  /** The knob must work while disabled, so it appends without the enabled gate. */
+  const setGate = (ctx: Ctx, disabled: boolean) => {
+    const s = get(ctx);
+    locks.acquire(s.cfg.boardDir, s.sessionId);
+    return commitWithCache(pi, s.manager, newEvent(s.projection, [{ type: 'gate', disabled }]), undefined, projector);
+  };
+  /**
+   * Toggling moves the two tool schemas in or out of the request's tool block, and the chat template
+   * renders that block at the head of the prompt, so the server re-prefills the whole context. This
+   * was measured, not inferred: with an otherwise pure-append message list, a tool-set change still
+   * reported cached_tokens = 0 (prefix-sentinel). The per-turn hint sits at the tail and is free.
+   */
+  const prefillCost = (ctx: Ctx) => {
+    const tokens = ctx.getContextUsage?.()?.tokens;
+    return typeof tokens === 'number' && tokens > 0
+      ? `The next request re-prefills the whole context (~${tokens.toLocaleString()} tokens): the two tools move in or out of the tool block, which the chat template renders at the head of the prompt.`
+      : 'The next request re-prefills the whole context: the two tools move in or out of the tool block, which the chat template renders at the head of the prompt.';
+  };
+  const confirmToggle = async (ctx: Ctx, action: 'off' | 'on') => {
+    const cost = prefillCost(ctx);
+    if (typeof ctx.ui?.confirm !== 'function') {
+      notify(ctx, `${cost} No confirmation dialog is available in this mode, so the change proceeds.`, 'warning');
+      return true;
+    }
+    return ctx.ui.confirm(`Blackboard ${action} on this branch`, `${cost} Turning it back with /bb ${action === 'off' ? 'on' : 'off'} costs another one. Continue?`);
+  };
+  const commit = (ctx: Ctx, event: ReturnType<typeof newEvent>) => {
+    const s = get(ctx);
+    if (!s.cfg.enabled) throw new Error(`Blackboard disabled (${disabledWhy(s)}); no state changed`);
+    locks.acquire(s.cfg.boardDir, s.sessionId);
+    return commitWithCache(pi, s.manager, event, undefined, projector);
+  };
+  const change = (ctx: Ctx, changes: JournalChange[], operationId?: string) => commit(ctx, newEvent(get(ctx).projection, changes, operationId));
+  const notify = (ctx: Ctx, text: string, kind = 'info') => ctx.ui?.notify?.(text, kind);
+  const activated = new Set<string>();
+  const syncTools = (ctx: Ctx) => {
+    const s = get(ctx), active = pi.getActiveTools();
+    // Only ever touch this extension's own tools: other extensions' and the user's choices stay.
+    const enabledOwn = s.cfg.enabled;
+    if (!enabledOwn) {
+      if (active.some(name => OWN_TOOLS.includes(name))) pi.setActiveTools(active.filter(name => !OWN_TOOLS.includes(name)));
+      activated.delete(s.sessionId);
+      return;
+    }
+    if (activated.has(s.sessionId)) return;
+    activated.add(s.sessionId);
+    const missing = OWN_TOOLS.filter(name => !active.includes(name));
+    if (missing.length) pi.setActiveTools([...active, ...missing]);
+  };
+  const result = (text: string, details: Record<string, unknown> = {}) => ({ content: [{ type: 'text' as const, text }], details });
+  const selected = (projection: JournalProjection, target: string) => {
+    const matches = Object.values(projection.entries).filter(entry => entry.validity === 'active' && (entry.id === target || entry.text.includes(target)));
+    if (!target || matches.length !== 1) throw new Error('Target must identify exactly one active entry');
+    return matches[0];
+  };
+  const dedicatedRepair = (ctx: Ctx) => {
+    const repair = get(ctx).projection.repair;
+    return !!repair && repair.extraRequests > 0 && ['queued', 'delivered'].includes(repair.phase);
+  };
+  const execute = async (callId: string, params: any, ctx: Ctx) => {
+    const s = get(ctx);
+    if (!s.cfg.enabled) throw new Error(`Blackboard disabled (${disabledWhy(s)}); no state changed`);
+    switch (params.action) {
+      case 'commit': {
+        const operationId = params.operationId ?? callId;
+        const request = { entries: params.entries ?? [], review: params.review, dropDraft: params.dropDraft ?? [] };
+        if (Object.hasOwn(s.projection.requests, operationId)) {
+          if (s.projection.requests[operationId] !== fingerprint(request)) throw new Error('Operation ID reused with different request');
+          return result('Already committed; no duplicate event or timestamp refresh.');
+        }
+        const pick = selectDraftLines(s.projection.draft, s.cfg.draftOnCommit, params.dropDraft ?? []);
+        const inputs: CommitInput[] = [...pick.selected.map(item => {
+          const sources = s.projection.draft?.sources?.[`c-${fingerprint([item.section, item.text]).slice(0, 24)}`] ?? [];
+          return { ...item, sources, origin: sources.length && sources.every(source => source.kind === 'tool') ? 'tool' as const : 'assistant' as const };
+        }), ...(params.entries ?? [])];
+        for (const input of inputs) {
+          validateSources(input.sources ?? [], s.branch, s.manager);
+          if (input.origin === 'user' && (!input.sources?.length || input.sources.some(source => source.kind !== 'user'))) throw new Error('User-origin notes require actual user-message sources; tool content is not authorization. For an agent-authored note or paraphrase, omit origin (defaults to assistant) or set origin="assistant". To claim user origin, call action="review" and attach the matching user SourceRef from its credential; never invent source IDs or fingerprints.');
+        }
+        const review = params.review ? validateReview(s.projection, params.review, s.branch, s.manager) : undefined;
+        const event = inputs.length ? planCommit(s.projection, inputs, operationId, undefined, request) : null;
+        if (!event && !review) return result('No new entries; use review plus an explicit receipt to confirm a range, or skip to discard a draft.');
+        const transaction = event ?? newEvent(s.projection, [], operationId);
+        transaction.requestFingerprint = fingerprint(request);
+        if (review) transaction.changes.push({ type: 'review', receipt: review });
+        if (s.projection.draft) {
+          const removed = new Set([...pick.selected, ...(params.entries ?? [])].map((item: CommitInput) => item.text));
+          const remaining = structuredClone(s.projection.draft) as PendingDraft;
+          for (const [section, lines] of Object.entries(remaining.sections)) remaining.sections[section as keyof typeof remaining.sections] = lines!.filter(line => !removed.has(line) && !(params.dropDraft ?? []).some((part: string) => line.toLowerCase().includes(part.toLowerCase())));
+          transaction.changes.push({ type: 'draft', draft: draftCandidates(remaining).length ? remaining : null, cursor: s.projection.cursor, turns: 0 });
+        }
+        const preview = reduceEvent(s.projection, transaction);
+        if (preview.repair && checkReadiness(preview, sourceRefs(s.branch, s.manager)).ok) transaction.changes.push({ type: 'repair', repair: { ...preview.repair, phase: 'checked' } });
+        const receipt = commit(ctx, transaction);
+        const entries = transaction.changes.filter(item => item.type === 'put').map(item => item.entry);
+        return result(`Committed v${receipt.projection.revision}.\n${entries.map(entry => `${entry.id}@${entry.revision} [${entry.section}] ${entry.text}`).join('\n')}\n${receipt.warning ?? ''}\nUse blackboard show/recall or /bb; there is no default board file.`, { revision: receipt.projection.revision, ids: entries.map(entry => entry.id), warning: receipt.warning });
+      }
+      case 'review': {
+        const offer = makeOffer(s.projection, s.branch, s.manager);
+        if (!Object.hasOwn(s.projection.offers, offer.id)) change(ctx, [{ type: 'offer', receipt: offer }]);
+        return result(`Review these candidates and the referenced current-context range. This is not an automatic correctness proof.\n${JSON.stringify({ credential: offer, candidates: draftCandidates(s.projection.draft), legacyUnscoped: Object.values(s.projection.entries).filter(entry => entry.validity === 'active' && entry.legacyUnscoped) }, null, 2)}\nConfirm using action=commit, review={id,constraintsChecked,executionChecked,goalChecked}; entries are optional.`, { credential: offer });
+      }
+      case 'retain': {
+        const entry = selected(s.projection, params.id ?? params.target ?? '');
+        if (params.expectedRevision !== entry.revision) throw new Error('retain requires expectedRevision');
+        const receipt = change(ctx, [{ type: 'retain', id: entry.id, expectedRevision: entry.revision }], callId);
+        return result(`Retained ${entry.id} for the next successful compaction only; fact validity and substantive time unchanged.`, { revision: receipt.projection.revision });
+      }
+      case 'skip': {
+        change(ctx, [{ type: 'draft', draft: null, cursor: s.projection.cursor }], callId);
+        return result('Draft discarded; this does not confirm review coverage.');
+      }
+      case 'show': {
+        if (params.id) {
+          const entry = s.projection.entries[params.id];
+          if (!entry) throw new Error('No entry with this ID on the current branch (history mode searches earlier revisions)');
+          return result(JSON.stringify(entry, null, 2), { entry, revision: s.projection.revision });
+        }
+        const index = buildIndex(s.projection, params.history === true ? 'history' : 'current')
+          .filter(hit => !params.section || hit.section === params.section);
+        const offset = Math.max(0, Number(params.offset) || 0);
+        const limit = Math.max(1, Math.min(60, Number(params.limit) || 20));
+        const page = index.slice(offset, offset + limit);
+        const more = offset + page.length < index.length;
+        const body = page.map(hit => `${hit.id}@${hit.revision} [${String(hit.section)}${hit.validity !== 'active' ? `/${hit.validity}` : ''}${hit.taskState ? `/${hit.taskState}` : ''}] ${hit.text}`);
+        const legacy = !s.projection.eventIds.length && existsSync(boardPath(s.cfg.boardDir, s.sessionId)) ? ['', 'Legacy board file detected: legacy/unscoped, not current facts. Run /bb migrate for a dry run.'] : [];
+        return result([`Notes: ${index.length} item(s), showing ${offset + 1}-${offset + page.length}.`, ...body, more ? `more: action=show offset=${offset + page.length}${params.section ? ` section=${params.section}` : ''}` : 'end of list.', ...legacy].join('\n'), { revision: s.projection.revision, nextOffset: more ? offset + page.length : null });
+      }
+      case 'archive': {
+        const entry = selected(s.projection, params.target ?? '');
+        const receipt = change(ctx, [{ type: 'archive', id: entry.id, expectedRevision: entry.revision }], callId);
+        return result(`Archived ${entry.id}; validity unchanged. History remains in session events.`, { revision: receipt.projection.revision });
+      }
+      default: throw new Error(`Unknown blackboard action: ${params.action}`);
+    }
+  };
+  pi.registerTool({
+    name: 'blackboard', label: 'Session Blackboard',
+    description: 'Maintain branch-local session notes. Commits are atomic session events. Show current notes, skip a draft, or archive an entry. Notes are agent statements, not independent verification. Markdown is export-only.',
+    promptGuidelines: [
+      'Record important goals, constraints, decisions, findings, task state and next actions as complete notes with their negative/uncertain qualifiers.',
+      'A changed file does not prove an issue resolved. Use explicit task states and evidence.',
+      'For ordinary notes or paraphrases omit origin (defaults to assistant). origin=user requires matching user-message SourceRefs from a review credential; a note about a user instruction is not automatically user-origin evidence. Never invent source IDs or fingerprints.',
+      'Review is two separate complete tool calls: first {"action":"review"} with no nested review object; after reading its credential, call {"action":"commit","review":{"id":"review-...","constraintsChecked":true,"executionChecked":true,"goalChecked":true}}. Use the returned credential ID, not a note ID; set flags only after checking that range.',
+      'After compaction restore notes with blackboard show; use blackboard_recall for a specific earlier fact. There is no default Markdown board to read.',
+    ],
+    parameters: Type.Object({
+      action: Type.Union(['commit', 'skip', 'show', 'archive', 'review', 'retain'].map(value => Type.Literal(value)), {
+        description: 'Required in every call. commit writes notes or confirms a returned review credential; review only requests that credential (call {"action":"review"} without a nested review field); show reads notes; skip discards a draft; archive moves an entry; retain grants one-compaction priority.',
+      }),
+      entries: Type.Optional(Type.Array(Type.Object({
+        section: Type.Optional(Type.Union(SECTIONS.filter(section => section !== 'archived').map(section => Type.Literal(section)))),
+        text: Type.Optional(Type.String()),
+        supersedes: Type.Optional(Type.String({ description: 'Legacy text-match replacement: a unique substring of the OLD note text, NOT an m-... entry ID. For an ID update use id plus its current expectedRevision instead. Omit for a new note.' })),
+        id: Type.Optional(Type.String({ description: 'Existing m-... note ID for an update; must also pass that note\'s current expectedRevision. Omit for a new note. Do not use note IDs as review credential IDs.' })),
+        expectedRevision: Type.Optional(Type.Integer({ minimum: 1, description: 'Required with an entry id; use the current revision shown as id@revision. Do not guess it.' })),
+        taskState: Type.Optional(Type.Union(['todo', 'in_progress', 'blocked', 'done', 'cancelled'].map(value => Type.Literal(value)))),
+        epistemic: Type.Optional(Type.Union(['stated', 'hypothesis', 'unknown'].map(value => Type.Literal(value)))),
+        origin: Type.Optional(Type.Union(['assistant', 'user', 'tool', 'native-summary', 'legacy'].map(value => Type.Literal(value)), {
+          description: 'Omit for ordinary agent-authored notes/paraphrases (default assistant). user is allowed only with matching user-message SourceRefs in sources; get exact refs from action=review. Merely repeating a user instruction does not justify user origin.',
+          default: 'assistant',
+        })),
+        sources: Type.Optional(Type.Array(Type.Object({ entryId: Type.String(), fingerprint: Type.String(), kind: Type.Union(['user', 'tool', 'assistant', 'native-summary', 'legacy'].map(value => Type.Literal(value))), callId: Type.Optional(Type.String()) }), {
+          description: 'Optional exact SourceRefs from action=review credential.range; never invent entry IDs or fingerprints. Omit for an unscoped assistant note. Required with matching kind=user when origin=user.',
+        })),
+        verification: Type.Optional(Type.String()), retain: Type.Optional(Type.Boolean()), legacyUnscoped: Type.Optional(Type.Boolean()),
+        validity: Type.Optional(Type.Union(['active', 'superseded', 'retracted'].map(value => Type.Literal(value)))),
+      }))),
+      target: Type.Optional(Type.String()), dropDraft: Type.Optional(Type.Array(Type.String())),
+      section: Type.Optional(Type.Union(SECTIONS.map(value => Type.Literal(value)))),
+      offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 60 })),
+      history: Type.Optional(Type.Boolean()),
+      operationId: Type.Optional(Type.String()), id: Type.Optional(Type.String()), expectedRevision: Type.Optional(Type.Integer()),
+      review: Type.Optional(Type.Object({
+        id: Type.String({ description: 'Exact review-... credential ID returned by an earlier action=review, never an m-... note ID.' }),
+        constraintsChecked: Type.Boolean(), executionChecked: Type.Boolean(), goalChecked: Type.Boolean(),
+      }, { description: 'Only for action=commit: confirms a previously returned review credential after actually checking its range. Omit this field when requesting action=review. All three flags must be true to confirm.' })),
+    }),
+    execute: async (id, params, _signal, _update, ctx) => {
+      const dedicated = dedicatedRepair(ctx);
+      try { return { ...await execute(id, params, ctx), ...(dedicated ? { terminate: true } : {}) }; }
+      catch (error) {
+        if (!dedicated) throw error;
+        return { ...result(`Memory repair failed: ${error instanceof Error ? error.message : String(error)}`), isError: true, terminate: true };
+      }
+    },
+  });
+  pi.registerTool({
+    name: 'blackboard_recall', label: 'Blackboard Recall',
+    description: 'Literal search over current branch notes, historical versions, the current transcript, or legacy archives. Pageable with a stable cursor; an unmatched page never means "nothing exists".',
+    parameters: Type.Object({
+      query: Type.String(),
+      mode: Type.Optional(Type.Union(['current', 'history', 'session'].map(value => Type.Literal(value)), { description: 'current (default) shows only valid notes; history adds superseded/retracted versions; session searches this branch transcript' })),
+      limit: Type.Optional(Type.Number()),
+      cursor: Type.Optional(Type.String()),
+    }),
+    execute: async (_id, params, _signal, _update, ctx) => {
+      const s = get(ctx);
+      if (!s.cfg.enabled) throw new Error('Blackboard disabled');
+      const page = searchPage({
+        projection: s.projection, branch: s.branch, sessionProjection: s.manager.buildSessionProjection?.(),
+        query: params.query ?? '', mode: params.mode ?? 'current', limit: params.limit, cursorToken: params.cursor,
+        archives: readLegacyArchives(s.cfg.boardDir, s.sessionId),
+      });
+      const lines = page.hits.map(hit => `${hit.source} · ${String(hit.section)} · ${hit.id}@${hit.revision} [${hit.validity}${hit.taskState ? `/${hit.taskState}` : ''}] ${hit.text}`);
+      const verdict = page.hits.length
+        ? `${page.hits.length} match(es) on this page.`
+        : page.complete
+          ? 'No match in the searched range (all current-branch notes, history and legacy archives were scanned).'
+          : 'No match on this page — the scan is NOT finished; continue with the cursor before concluding anything.';
+      const footer = page.nextCursor
+        ? `more available: pass cursor="${page.nextCursor}" (archives ${page.scannedArchives} scanned this page, ${page.totalArchives} total).`
+        : 'scan complete.';
+      return { ...result([verdict, ...lines, footer].join('\n'), { nextCursor: page.nextCursor, complete: page.complete }), ...(dedicatedRepair(ctx) ? { terminate: true } : {}) };
+    },
+  });
+  const pressure = (ctx: Ctx) => {
+    const s = get(ctx), usage = ctx.getContextUsage?.();
+    return computePressure(usage, ctx.cwd ?? s.manager.getCwd?.() ?? process.cwd(), ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, s.cfg.compactionWarnTokens);
+  };
+  const collectTurn = (event: any, ctx: Ctx) => {
+    const s = get(ctx); if (!s.cfg.enabled) return;
+    for (const id of [event.messageEntryId, ...(event.toolResultEntryIds ?? [])].filter(Boolean)) {
+      if (!s.branch.some(entry => entry.id === id)) throw new Error('turn_end source ID is not on this branch');
+    }
+    const start = s.projection.cursor ? s.branch.findIndex(entry => entry.id === s.projection.cursor) + 1 : 0;
+    const freshIds = new Set(s.branch.slice(start).filter(entry => entry.type === 'message').map(entry => entry.id));
+    const cursor = [...s.branch].reverse().find(entry => entry.type === 'message')?.id;
+    if (!freshIds.size || cursor === s.projection.cursor) return;
+    const projected = s.manager.buildSessionProjection?.().entries;
+    const branch = projected ? projected.filter((item: any) => item.sourceEntry.type === 'message' && item.messages.length).map((item: any) => ({ ...item.sourceEntry, message: item.messages[0] })) : s.branch;
+    const blocks = normalizeBranch(branch);
+    const refs = new Map(sourceRefs(s.branch, s.manager).map(source => [source.entryId, source]));
+    const draft: PendingDraft = structuredClone(s.projection.draft ?? { generatedAt: new Date().toISOString(), sections: {}, sources: {} });
+    draft.sources ??= {};
+    const board = toBoard(s.projection), state = defaultState();
+    const groups = [
+      ...blocks.users.filter(block => freshIds.has(block.entryId)).map(block => ({ entryId: block.entryId, users: [block], assistants: [], tools: [] })),
+      ...blocks.assistants.filter(block => freshIds.has(block.entryId)).map(block => ({ entryId: block.entryId, users: [], assistants: [block], tools: [] })),
+      ...blocks.tools.filter(block => freshIds.has(block.entryId) && !OWN_TOOLS.includes(block.name)).map(block => ({ entryId: block.entryId, users: [], assistants: [], tools: [block] })),
+    ];
+    for (const group of groups) {
+      const extracted = extractAll(group, board, state);
+      if (group.users.length) state.goalExtracted = true;
+      for (const [section, lines] of Object.entries(extracted.draft)) for (const text of lines ?? []) {
+        const key = section as keyof typeof draft.sections;
+        if (!(draft.sections[key] ?? []).includes(text)) (draft.sections[key] ??= []).push(text);
+        const ref = refs.get(group.entryId);
+        if (ref) draft.sources[`c-${fingerprint([section, text]).slice(0, 24)}`] = [ref];
+      }
+      draft.experiments = [...new Set([...(draft.experiments ?? []), ...extracted.experiments])];
+    }
+    change(ctx, [{ type: 'draft', draft: draftCandidates(draft).length || draft.experiments?.length ? draft : null, cursor, turns: s.projection.turns + 1 }]);
+  };
+  const reminder = (ctx: Ctx) => {
+    const s = get(ctx); if (!s.cfg.enabled) return;
+    const p = pressure(ctx), near = p?.near === true;
+    const due = near || (s.projection.draft && s.projection.turns % s.cfg.checkpointTurns === 0);
+    // The countdown is a transient block computed from this turn's measurement only. It is never
+    // stored as a note, never copied into a summary, and disappears with its compaction generation.
+    const lines = s.cfg.contextPressure && typeof p?.remaining === 'number' && p.remaining !== null && ctx.getContextUsage?.()
+      ? [describePressure(p)!] : [];
+    if (!due && !lines.length) return;
+    if (due) lines.push(
+      '[session-blackboard checkpoint]',
+      near ? 'NEAR COMPACTION: pause task expansion and write important changes now.' : 'Review pending session notes on this existing request.',
+      'Call blackboard action=review to inspect the complete candidates and receive a content-bound credential; commit useful notes and explicitly confirm the reviewed range. skip only discards the draft and does not confirm coverage. Notes need goals, constraints (or explicit none-new), execution state, decisions and uncertainties.');
+    return { message: { customType: 'sbb-review-needed', display: false, details: { generation: s.projection.generation }, content: lines.join('\n') } };
+  };
+  pi.on('session_start', async (_event, ctx) => {
+    activated.clear();
+    syncTools(ctx);
+    const s = get(ctx);
+    for (const hint of s.cfg.hints ?? []) notify(ctx, `session-blackboard settings: ${hint}`, 'warning');
+    if (s.gated) notify(ctx, 'session-blackboard is manually disabled on this branch: no tools, no notes, no compaction takeover. This is journal state, so it stays disabled when the session is resumed; /bb on re-enables it.', 'info');
+    else if (!s.cfg.enabled) notify(ctx, 'session-blackboard is disabled: no tools, no notes, no compaction takeover.', 'info');
+    else if (s.cfg.compaction === 'off') notify(ctx, 'session-blackboard: notes are available, compaction stays native (compaction="off").', 'info');
+    else if (s.cfg.compaction === 'board') notify(ctx, 'session-blackboard: the board takes over compaction when its coverage is established.', 'info');
+  });
+  pi.on('turn_end', async (event, ctx) => { collectTurn(event, ctx); });
+  /** One short line, model-facing: past tool calls stay in history, so say the board is off. */
+  const DISABLED_NOTICE = '[session-blackboard] Disabled on this branch; do not call its tools.';
+  /** Records the delivery. Like the knob itself, it appends without the enabled gate. */
+  const gateMark = (ctx: Ctx, generation: number) => {
+    const s = get(ctx);
+    locks.acquire(s.cfg.boardDir, s.sessionId);
+    return commitWithCache(pi, s.manager, newEvent(s.projection, [{ type: 'gate-notice', generation }]), undefined, projector);
+  };
+  /**
+   * The notice is delivered once per compaction generation as a real session message, never re-added
+   * to every request: a projection-only hint is invisible to the next turn anyway, so the only thing
+   * it achieves is repeating itself forever. A successful compaction retires it and the next
+   * generation gets one fresh line; a stale call is still blocked with a stated reason.
+   */
+  const gateNotice = (ctx: Ctx) => {
+    const s = get(ctx);
+    if (!s.gated) return undefined;
+    const generation = s.projection.generation;
+    if (s.projection.gateNotice?.generation === generation) return undefined;
+    try { gateMark(ctx, generation); }
+    catch (error) { notify(ctx, `The disabled notice was sent but not recorded: ${error instanceof Error ? error.message : String(error)}; it may be sent again next turn.`, 'warning'); }
+    return { message: { customType: 'sbb-disabled', display: false, content: DISABLED_NOTICE, details: { generation } } };
+  };
+  pi.on('before_agent_start', async (_event, ctx) => { syncTools(ctx); const notice = gateNotice(ctx); return notice ?? reminder(ctx); });
+  const noticesShown = new Set<string>();
+  const OWN_MESSAGE_PREFIX = 'sbb-';
+  const generationOf = (message: any): number | undefined => {
+    const value = message?.details?.generation;
+    return typeof value === 'number' ? value : undefined;
+  };
+  pi.on('context', async (event, ctx) => {
+    const s = get(ctx), repair = s.projection.repair;
+    const before = Array.isArray(event.messages) ? event.messages : [];
+    if (!s.cfg.enabled) {
+      // The tools left the request, but their earlier calls and this extension's own hints are still
+      // in the history. Drop the stale hints; the one-line disabled notice is a real message and stays
+      // visible for the generation it was written for. Nothing is injected here.
+      const generation = s.projection.generation;
+      const messages = before.filter((message: any) => {
+        if (message?.role !== 'custom' || typeof message.customType !== 'string' || !message.customType.startsWith(OWN_MESSAGE_PREFIX)) return true;
+        return message.customType === 'sbb-disabled' && generationOf(message) === generation;
+      });
+      if (messages.length === before.length) return;
+      return { messages };
+    }
+    // Only a request that actually reaches the provider proves the repair message was delivered.
+    if (repair?.phase === 'queued') change(ctx, [{ type: 'repair', repair: { ...repair, phase: 'delivered' } }]);
+    const generation = s.projection.generation;
+    // Old-generation extension hints are removed from the model-visible projection only; the
+    // session log, user content and pending drafts are untouched.
+    const messages = before.filter((message: any) => {
+      if (message?.role !== 'custom' || typeof message.customType !== 'string' || !message.customType.startsWith(OWN_MESSAGE_PREFIX)) return true;
+      const tagged = generationOf(message);
+      return tagged === undefined ? generation === 0 : tagged === generation;
+    });
+    let changed = messages.length !== before.length;
+    const key = `${s.sessionId}:${generation}`;
+    if (s.projection.expiredIds.length && !noticesShown.has(key)) {
+      noticesShown.add(key);
+      const ids = s.projection.expiredIds.slice(0, 20).join(', ');
+      messages.push({ role: 'custom', customType: 'sbb-retention-notice', display: false,
+        content: `[session-blackboard] The previous successful compaction consumed these retention grants: ${ids}. Re-promote an entry explicitly (blackboard action=retain with expectedRevision) only if it must be protected next time; handled items need no action. Validity, constraints and task state are unchanged.`,
+        timestamp: Date.now() });
+      changed = true;
+    }
+    if (changed) return { messages };
+  });
+  pi.on('tool_call', async (event, ctx) => {
+    // A disabled board still has its calls in history, so the model may try one again.
+    if (!get(ctx).cfg.enabled && OWN_TOOLS.includes(event.toolName)) return { block: true, reason: 'session-blackboard is disabled on this branch; /bb on re-enables it.' };
+    if (dedicatedRepair(ctx) && !OWN_TOOLS.includes(event.toolName)) return { block: true, terminate: true, reason: 'Dedicated memory repair: pause task expansion; only blackboard tools are allowed for this bounded request.' };
+  });
+  const repairMessage = (projection: JournalProjection, branch: BranchEntry[], manager: Ctx, reasons: string[]) => {
+    const offer = makeOffer(projection, branch, manager);
+    const candidateIds = draftCandidates(projection?.draft ?? null);
+    return { offer, content: `[session-blackboard urgent memory write]\nPause task expansion. This is a bounded memory-only request: commit/correct notes and explicitly confirm this credential. No separate summarizer is called.\nReason: ${reasons.length ? reasons.join('; ') : 'memory not yet ready for compaction'}\n${JSON.stringify({ credential: offer, candidates: candidateIds })}` };
+  };
+  /** Contributions that actually leave the retained tail for this preparation. */
+  const requiredAtCut = (branch: BranchEntry[], firstKeptEntryId: string | null | undefined, refs: ReturnType<typeof sourceRefs>) => {
+    if (!firstKeptEntryId) return refs;
+    const cut = branch.findIndex(entry => entry.id === firstKeptEntryId);
+    if (cut < 0) return refs; // unknown cut: be conservative, require everything
+    const leaving = new Set(branch.slice(0, cut).map(entry => entry.id));
+    return refs.filter(ref => leaving.has(ref.entryId));
+  };
+  /** Record that a repair is owed, without spending a request or starting a model call. */
+  const markNeeded = (ctx: Ctx, range?: string) => {
+    const s = get(ctx), previous = s.projection.repair;
+    if (previous?.phase === 'needed') return;
+    const { offer } = repairMessage(s.projection, s.branch, s.manager, []);
+    change(ctx, [
+      ...(Object.hasOwn(s.projection.offers, offer.id) ? [] : [{ type: 'offer' as const, receipt: offer }]),
+      { type: 'repair', repair: { generation: s.projection.generation, extraRequests: previous?.extraRequests ?? 0, phase: 'needed', requestId: previous?.requestId ?? randomUUID(), rangeFingerprint: range ?? fingerprint(offer.range), instructions: previous?.instructions } },
+    ]);
+  };
+  /** Spend one of the two allowances and hand the message to the boundary already running. */
+  const takeAndSend = (ctx: Ctx, range?: string) => {
+    const s = get(ctx), previous = s.projection.repair, used = previous?.extraRequests ?? 0;
+    if (used >= 2) return null;
+    const { offer, content } = repairMessage(s.projection, s.branch, s.manager, []);
+    change(ctx, [
+      ...(Object.hasOwn(s.projection.offers, offer.id) ? [] : [{ type: 'offer' as const, receipt: offer }]),
+      { type: 'repair', repair: { generation: s.projection.generation, extraRequests: used + 1, phase: 'queued', requestId: randomUUID(), rangeFingerprint: range ?? previous?.rangeFingerprint ?? fingerprint(offer.range), instructions: previous?.instructions } },
+    ]);
+    return content;
+  };
+  pi.on('agent_before_settle', async (event, ctx) => {
+    const s = get(ctx);
+    if (!s.cfg.enabled || !event.context.canContinue) return;
+    if (s.projection.repair?.phase === 'exhausted') return;
+    // A user abort (Escape) never becomes a hidden continuation; the spent request is not refunded.
+    if (event.outcome === 'aborted' || ctx.signal?.aborted) {
+      if (s.projection.repair?.phase === 'queued') change(ctx, [{ type: 'repair', repair: { ...s.projection.repair, phase: 'needed' } }]);
+      return;
+    }
+    if (s.cfg.compaction !== 'board') return;
+    const refs = sourceRefs(s.branch, s.manager);
+    const last = [...s.branch].reverse().find(entry => entry.type === 'message');
+    const required = refs.filter(ref => ref.entryId !== last?.id || last?.message?.role !== 'assistant' || (Array.isArray(last.message.content) && last.message.content.some((part: any) => part.type === 'toolCall')));
+    const ready = checkReadiness(s.projection, required);
+    if (ready.ok || (s.projection.repair?.extraRequests ?? 0) >= 2) return;
+    // Exactly two deliveries per generation, and exactly one delivery point. A request that was
+    // sent and visibly ignored becomes owed again here; one still in flight is left alone.
+    const phase = s.projection.repair?.phase;
+    if (phase && phase !== 'needed') return;
+    const pending = phase === 'needed';
+    if (!pending && !pressure(ctx)?.near) return;
+    if (!repairHeadroom(ctx.getContextUsage?.(), repairMessage(s.projection, s.branch, s.manager, ready.reasons).content, event.context.llmMessages)) return;
+    if (!pending) markNeeded(ctx);
+    const content = takeAndSend(ctx);
+    if (!content) return;
+    return { entries: [{ type: 'custom_message', customType: 'sbb-urgent-write', content, display: false, details: { generation: s.projection.generation } }], continue: true };
+  });
+  pi.on('session_tree', async (_event, ctx) => { activated.clear(); syncTools(ctx); });
+  pi.on('session_shutdown', async () => { activated.clear(); locks.release(); });
+  const logAttempt = (kind: string, data: Record<string, unknown>) => {
+    try { pi.appendEntry('sbb-compaction', { kind, at: new Date().toISOString(), ...data }); } catch { /* diagnostics only */ }
+  };
+  /** Diagnostics: counts, ids and reasons only — never raw message or tool bodies. */
+  const debugRecord = (ctx: Ctx, data: Record<string, unknown>) => {
+    const s = get(ctx);
+    if (!s.cfg.debugLog) return;
+    try {
+      pi.appendEntry('sbb-debug', { at: new Date().toISOString(), revision: s.projection.revision, generation: s.projection.generation,
+        entries: Object.keys(s.projection.entries).length, history: s.projection.history.length, ...data });
+    } catch { /* diagnostics only */ }
+  };
+  const summaryFor = (s: ReturnType<typeof get>, maxChars = s.cfg.summaryMaxChars) => {
+    const board = toBoard(s.projection);
+    return renderSummary(board, {
+      maxChars,
+      keptTailNote: 'pi keeps the most recent turns verbatim right after this summary (keepRecentTokens); do not restate them, a one-line forward pointer is enough.',
+      recallTool: 'blackboard_recall',
+    });
+  };
+  /** Manual compaction with custom instructions wants a written summary; honour them natively and carry the facts. */
+  const assistedSummary = async (ctx: Ctx, event: any, s: ReturnType<typeof get>) => {
+    const model = ctx.model, registry = ctx.modelRegistry;
+    if (!s.cfg.compactAssist || !model || typeof registry?.getApiKeyAndHeaders !== 'function') return null;
+    const section = summaryFor(s, Math.min(s.cfg.compactAssistMaxChars, s.cfg.summaryMaxChars));
+    if (!section) return null;
+    try {
+      const auth = await registry.getApiKeyAndHeaders(model);
+      if (!auth || auth.ok !== true) return null;
+      const result = await compact(event.preparation, model, auth.apiKey, auth.headers, event.customInstructions, event.signal, ctx.thinkingLevel, undefined, auth.env);
+      return `${result.summary}\n\n${section}`;
+    } catch { return null; }
+  };
+  // Explicit deferral is the only thing this hook does besides handing over a finished summary.
+  pi.on('session_before_compact', async (event, ctx) => {
+    const s = get(ctx);
+    if (!s.cfg.enabled) return;
+    if (s.cfg.compaction !== 'board') return;
+    const board = toBoard(s.projection);
+    // An explicit user request for the native summary is obeyed immediately and once.
+    if (s.projection.native) {
+      if (nativeRequestFresh(s.projection)) {
+        change(ctx, [{ type: 'native' }]);
+        logAttempt('native-requested', { reason: event.reason });
+        notify(ctx, 'Native compaction requested; blackboard does not take over this one.', 'info');
+        return;
+      }
+      change(ctx, [{ type: 'native' }]);
+    }
+    if (!hasSummaryContext(board)) {
+      notify(ctx, 'Not taking over compaction: no current goal/task context on the blackboard; native summary used.', 'warning');
+      return; // too thin -> honest native flow
+    }
+    const cut = event.preparation?.firstKeptEntryId;
+    const required = requiredAtCut(s.branch, cut, sourceRefs(s.branch, s.manager));
+    const ready = checkReadiness(s.projection, required);
+    const range = fingerprint(required);
+    const summary = ready.ok ? summaryFor(s) : null;
+    const problems = [...ready.reasons, ...(ready.ok && !summary ? ['blackboard summary exceeds its budget; write a shorter sourced version'] : [])];
+    if (!problems.length && summary) {
+      const honoured = event.reason === 'manual' && typeof event.customInstructions === 'string' && event.customInstructions.trim()
+        ? await assistedSummary(ctx, event, s) : null;
+      logAttempt('takeover', { reason: event.reason, assisted: !!honoured, revision: s.projection.revision, generation: s.projection.generation, chars: (honoured ?? summary).length });
+      debugRecord(ctx, { event: 'takeover', reason: event.reason, chars: (honoured ?? summary).length, omitted: Object.values(s.projection.entries).filter(entry => entry.validity === 'active').length - (summary.match(/^- /gm) ?? []).length });
+      return { compaction: {
+        summary: honoured ?? summary,
+        firstKeptEntryId: cut ?? s.branch.at(-1)?.id ?? '',
+        tokensBefore: event.preparation?.tokensBefore ?? 0,
+        details: { generator: SUMMARY_GENERATOR, schema: SUMMARY_SCHEMA, source: 'session-events', revision: s.projection.revision, generation: s.projection.generation, ...(honoured ? { assisted: true, note: 'native text honours manual instructions; blackboard section appended' } : {}) },
+      } };
+    }
+    const allowance = s.projection.repair?.extraRequests ?? 0;
+    const headroom = repairHeadroom(ctx.getContextUsage?.(), repairMessage(s.projection, s.branch, s.manager, problems).content);
+    const phase = s.projection.repair?.phase;
+    // Cancelling is only honest when this same run can deliver the repair: never while a request
+    // is in flight, never after the user cancelled, and never with the allowance spent.
+    const usable = event.reason !== 'manual' && event.reason !== 'overflow' && allowance < 2 && headroom
+      && phase !== 'queued' && phase !== 'exhausted' && phase !== 'checked';
+    if (usable) {
+      // Never start the model from inside the hook: mark the repair pending and let the
+      // run's own before-settle boundary deliver it.
+      // A previously delivered request that did not fix the range becomes owed again (allowance 2).
+      if (s.projection.repair?.phase === 'delivered') {
+        change(ctx, [{ type: 'repair', repair: { ...s.projection.repair, phase: 'needed' } }]);
+      } else if (s.projection.repair?.phase !== 'needed') markNeeded(ctx, range);
+      logAttempt('deferred', { reason: event.reason, problems: problems.length, allowance: allowance + 1, generation: s.projection.generation });
+      notify(ctx, 'Compaction deferred for a bounded memory repair; the current turn will finish it.', 'info');
+      return { cancel: true };
+    }
+    const why = event.reason === 'manual'
+      ? 'manual compaction has no safe deferral path here'
+      : event.reason === 'overflow'
+        ? 'context already overflowed; no safe headroom for a repair turn'
+        : allowance >= 2
+          ? 'both bounded repair requests were spent'
+          : 'no safe headroom for a repair turn';
+    notify(ctx, `Native summary used (${event.reason}): ${why}. Still unresolved: ${problems.join('; ')}`, 'warning');
+    logAttempt('native-fallback', { reason: event.reason, why, problems: problems.length });
+    debugRecord(ctx, { event: 'native-fallback', reason: event.reason, why, problems });
+    return;
+  });
+  // A persisted compaction node is the only proof of success: it advances the generation and
+  // consumes retention on replay. This handler only clears one-shot/ephemeral requests.
+  pi.on('session_compact', async (event, ctx) => {
+    const s = get(ctx);
+    if (!s.cfg.enabled) return;
+    const entry = event?.compactionEntry as { id?: string; summary?: string; details?: unknown; fromHook?: boolean } | undefined;
+    const ours = isOwnSummary(entry?.details);
+    const changes: JournalChange[] = [];
+    if (s.projection.native) changes.push({ type: 'native' });
+    if (s.projection.repair) changes.push({ type: 'repair', repair: { ...s.projection.repair, phase: 'checked' } });
+    if (changes.length) change(ctx, changes);
+    if (entry?.summary && !ours) {
+      // Some other producer (pi itself, assist, another extension) wrote this summary. It is the
+      // only record of the replaced messages, so it is imported with its source reference, never
+      // skipped just because `fromExtension` happens to be true.
+      const sourceId = entry.id ?? `summary-${fingerprint(entry.summary).slice(0, 16)}`;
+      try {
+        const planned = planImport(replayBranch(s.manager.getBranch()), sourceId, entry.summary, `import-${sourceId}`);
+        if (planned.event) change(ctx, planned.event.changes, planned.event.operationId);
+        logAttempt('foreign-summary', { compactionId: sourceId, fromHook: entry.fromHook === true, imported: planned.imported, duplicates: planned.duplicates, incomplete: planned.incomplete.length });
+        notify(ctx, planned.incomplete.length
+          ? `Imported ${planned.imported} native-summary entries; ${planned.incomplete.length} oversized block(s) were NOT imported (original summary still referenced: ${sourceId}). Content is unverified and this is not claimed complete.`
+          : `Imported ${planned.imported} native-summary entries (${planned.duplicates} already known) from ${sourceId}; content is unverified — review before relying on it.`, planned.incomplete.length ? 'warning' : 'info');
+      } catch (error) {
+        logAttempt('foreign-summary-error', { compactionId: sourceId, error: error instanceof Error ? error.message : String(error) });
+        notify(ctx, `Could not import the foreign summary: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      }
+    }
+    logAttempt('success', { reason: event?.reason, fromUs: ours, generation: replayBranch(s.manager.getBranch()).generation });
+  });
+  pi.registerCommand('bb', {
+    description: 'Session notes: show | commit <JSON> | skip | archive <ID> | reset | on | off | status. Markdown is export-only.',
+    handler: async (args, ctx) => {
+      try {
+        const match = /^\s*(\S+)?\s*([\s\S]*)$/.exec(args ?? '')!;
+        const command = (match[1] ?? 'show').toLowerCase(), body = match[2];
+        if (command === 'native') {
+          change(ctx, [{ type: 'native', native: { at: new Date().toISOString(), ttlMs: 5 * 60 * 1000 } }]);
+          notify(ctx, 'Next compaction runs pi\'s native summary (valid 5 minutes); the blackboard will not take over.');
+          return;
+        }
+        if (command === 'off' || command === 'disable') {
+          const s = get(ctx);
+          if (s.gated) { notify(ctx, `Already manually disabled on this branch${s.projection.gate?.at ? ` since ${s.projection.gate.at}` : ''}; /bb on re-enables.`); return; }
+          if (!s.cfg.enabled) { notify(ctx, 'Already disabled by settings; the knob changes nothing. Set session-blackboard.enabled to re-enable.', 'warning'); return; }
+          if (!(await confirmToggle(ctx, 'off'))) { notify(ctx, 'Cancelled; the blackboard stays enabled and the prompt prefix stays intact.'); return; }
+          const receipt = setGate(ctx, true);
+          syncTools(ctx);
+          notify(ctx, `Blackboard disabled on this branch at revision ${receipt.projection.revision}: no tools, no notes, no compaction takeover. The state is a journal event, so resuming or continuing this session stays disabled. /bb on re-enables.`);
+          return;
+        }
+        if (command === 'on' || command === 'enable') {
+          const s = get(ctx);
+          if (!s.gated) { notify(ctx, `Not manually disabled (settings enabled=${s.settingsEnabled}); nothing changed.`); return; }
+          if (!(await confirmToggle(ctx, 'on'))) { notify(ctx, 'Cancelled; the blackboard stays disabled on this branch.'); return; }
+          const receipt = setGate(ctx, false);
+          syncTools(ctx);
+          notify(ctx, `Blackboard re-enabled on this branch at revision ${receipt.projection.revision}.`);
+          return;
+        }
+        if (command === 'status') {
+          const s = get(ctx);
+          notify(ctx, JSON.stringify({
+            settingsEnabled: s.settingsEnabled, manuallyDisabled: s.gated, disabledSince: s.projection.gate?.at,
+            effectiveEnabled: s.cfg.enabled, revision: s.projection.revision, generation: s.projection.generation,
+            activeEntries: Object.values(s.projection.entries).filter(entry => entry.validity === 'active').length,
+            ownTools: pi.getActiveTools().filter(name => OWN_TOOLS.includes(name)),
+          }, null, 2));
+          return;
+        }
+        if (command === 'cancel-repair') {
+          const s = get(ctx);
+          if (s.projection.repair) change(ctx, [{ type: 'repair', repair: { ...s.projection.repair, phase: 'exhausted' } }]);
+          notify(ctx, 'Pending memory repair cancelled; no further repair requests will be sent until a compaction succeeds.');
+          return;
+        }
+        if (command === 'debug') {
+          const s = get(ctx);
+          const entries = s.branch.filter(entry => entry.type === 'custom' && (entry.customType === 'sbb-debug' || entry.customType === 'sbb-compaction'))
+            .slice(-30).map(entry => JSON.stringify(entry.data));
+          notify(ctx, entries.length ? entries.join('\n') : `no diagnostics recorded (debugLog=${s.cfg.debugLog})`);
+          return;
+        }
+        if (command === 'export') {
+          const s = get(ctx), options = exportOptions(body);
+          const text = renderSnapshot(s.projection, s.manager.getLeafId?.() ?? s.branch.at(-1)?.id ?? '');
+          if (options.output) {
+            const path = resolve(ctx.cwd ?? s.manager.getCwd?.() ?? process.cwd(), options.output);
+            exportMarkdown(path, text, options.overwrite); notify(ctx, `Verified Markdown snapshot exported to ${path}; edits are not imported.`);
+          } else notify(ctx, text);
+          return;
+        }
+        if (command === 'migrate') {
+          const s = get(ctx);
+          if (!s.cfg.enabled) throw new Error('Blackboard disabled');
+          const report = inspectLegacy(s.cfg.boardDir, s.sessionId);
+          if (body.trim() !== 'apply') {
+            notify(ctx, JSON.stringify({ dryRun: true, files: report.records.map(({ relative, hash }) => ({ relative, hash })), entries: report.inputs.length, warnings: report.warnings, manifestHash: report.manifestHash, note: 'Apply only explicitly: /bb migrate apply. All imported notes remain legacy/unscoped/unknown until reviewed.' }, null, 2));
+          } else {
+            const imported = migrateLegacy(s.cfg.boardDir, s.sessionId, s.projection, event => commit(ctx, event));
+            notify(ctx, `Legacy migration: ${imported.count} candidates; alreadyImported=${imported.alreadyImported}; byte-verified backup=${imported.backup ?? 'none'}. Imported entries are unscoped and unverified.`);
+          }
+          return;
+        }
+        if (command === 'retain') {
+          const [id, revision] = body.trim().split(/\s+/);
+          notify(ctx, (await execute(randomUUID(), { action: 'retain', id, expectedRevision: Number(revision) }, ctx)).content[0].text); return;
+        }
+        if (command === 'reset') {
+          if (await ctx.ui.confirm('Reset this branch?', 'Retract current notes on this path; preserve the event history and other branches?')) {
+            change(ctx, [{ type: 'reset' }]); notify(ctx, 'Current branch reset; history preserved.');
+          }
+          return;
+        }
+        const parsed = command === 'commit' ? JSON.parse(body) : undefined;
+        const params = command === 'commit' ? { action: command, ...(Array.isArray(parsed) ? { entries: parsed } : parsed) }
+          : { action: command, target: body, ...(command === 'show' && body.trim() ? { id: body.trim() } : {}) };
+        notify(ctx, (await execute(randomUUID(), params, ctx)).content[0].text);
+      } catch (error) { notify(ctx, error instanceof Error ? error.message : String(error), 'error'); }
+    },
+  });
 }

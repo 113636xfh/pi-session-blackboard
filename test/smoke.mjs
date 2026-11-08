@@ -463,9 +463,10 @@ check("a native summary is parsed into routed, single-line entries", () => {
 	assert.ok(parsed.every((p) => !p.text.includes(String.fromCharCode(10))), "entries stay one line each");
 });
 
-check("content beats the header: an error line under Progress becomes an Issue", () => {
+check("an explicit heading wins over an error keyword", () => {
 	const parsed = parseSummarySections("## Progress" + String.fromCharCode(10) + "- 修好了相机，但 MCP 截图报 ENOENT 仍然存在");
-	assert.equal(parsed[0].section, "issues");
+	assert.equal(parsed[0].section, "findings", "Progress content is not re-routed by content keywords");
+	assert(parsed[0].text.includes("ENOENT"), "the error text is preserved verbatim");
 });
 
 check("a native summary merges into an EMPTY board", () => {
@@ -601,9 +602,10 @@ check("a measured-result line under a neutral header lands in findings", () => {
 	assert.equal(parsed[0].section, "findings");
 });
 
-check("decision language wins over finding language (route priority)", () => {
+check("an explicit heading wins over content keywords (no silent re-routing)", () => {
 	const parsed = parseSummarySections("## Progress" + String.fromCharCode(10) + "- 实测更快，所以决定选择黑板方案");
-	assert.equal(parsed[0].section, "decisions", "a line naming the choice stays in Decisions");
+	assert.equal(parsed[0].section, "findings", "Progress content stays where its heading put it");
+	assert(parsed[0].text.includes("决定选择黑板方案"), "the wording is preserved verbatim");
 });
 
 check("a findings entry renders in the board and the summary", () => {
@@ -614,7 +616,7 @@ check("a findings entry renders in the board and the summary", () => {
 	const md = renderBoard(b);
 	assert.ok(md.includes("## Findings"), "board file has a Findings section");
 	const out = renderSummary(b);
-	assert.ok(out && out.includes("## Key Findings") && out.includes("实测 compact"), "summary carries the finding");
+	assert.ok(out && out.includes("## Critical Context") && out.includes("实测 compact"), "summary carries the finding under Critical Context");
 });
 
 check("merge routes a Findings header into the findings section", () => {

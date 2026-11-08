@@ -1,479 +1,234 @@
 # pi-session-blackboard
 
-**把 pi 的压缩摘要从「模型调用」变成「文件渲染」。**
+**能跨压缩存活的会话笔记；当笔记足够用时，压缩摘要的模型调用次数为零。**
 
-扩展为每个会话维护一块*黑板*——一个纯 markdown 文件，里面是审校过的事实。每个回合
-用纯 TS 确定性抽取候选事实（零模型），草稿交给代理自己审校，落盘成一行一条事实。
-压缩触发时，**这个文件就是摘要**：pi 的摘要模型调用被整个跳过，而 pi 自己的切点算法、
-保留尾部、compaction entry 全部不变。
+扩展把每个会话的笔记（*黑板*）保存在 **pi 的会话事件**里：分支内生效、只追加、在渲染
+之前不进入模型上下文。每个回合用纯 TS 确定性抽取候选事实（零模型），交给代理自己审校。
+压缩触发时，只有笔记**确实覆盖了即将离开保留尾部的内容**，才会被渲染成摘要；否则扩展会
+向当前模型请求一次有界补写，补写无法安全完成时退回 pi 的原生摘要。
 
-> ⚠️ **用之前要知道的取舍。** `"board"` 模式省掉摘要模型调用，摘要也就变成确定性的，
-> 但摘要同时成了「已提交内容的渲染」。LLM 摘要还会重新叙事，你丢的是那层叙事：
-> 语气、保留余地、没成形的推理，以及任何没写下来的东西；事实本身不会丢。
-> 可以退回的地方：pi 的保留尾部仍是逐字原文，被替换和被轮转的行都在盘上，用
-> `blackboard_recall`（当前黑板、`archive/`、快照 digest）或 `/bb show` 能读回来；
-> 真实条目少于 3 条时会退回原生摘要。默认 `compaction: "off"` 完全不碰 pi 的原生
-> 流程。核心路径有 54 项 smoke 覆盖，也已在真实会话里日常使用多日。欢迎在
-> [issues](https://github.com/113636xfh/pi-session-blackboard/issues) 反馈；
-> 另见[已知局限](#已知局限)。
+下面每一条都可以被证伪。措辞比 0.2 刻意保守：「事实在黑板里」从不等于「事实一定被记下
+了」，「零摘要调用」以覆盖闸门通过为前提。
 
-[![test](https://github.com/113636xfh/pi-session-blackboard/actions/workflows/test.yml/badge.svg)](https://github.com/113636xfh/pi-session-blackboard/actions/workflows/test.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 English: [README.md](README.md)
 
 | | pi 原生压缩 | 本扩展（`"compaction": "board"`） |
 |---|---|---|
-| 摘要模型调用 | 每次压缩一次 | **零次** |
-| 耗时（同一台本地机，W4A16 27B over PCIe） | > 3 分钟未跑完 | **0.0 秒** |
-| 精确事实（路径、符号、报错原文） | 模型留下什么算什么 | 代理 commit 了什么就是什么 |
-| 事后能否检查 | 不能 | 一个可以 `grep` 的 markdown 文件 |
-| 后台 LLM 调用 | — | **永不** |
+| 摘要模型调用 | 每次压缩一次 | 覆盖建立后 **零次** |
+| 压缩前的额外模型请求 | 0 | **最多 2 次**，仅在笔记不完整时 |
+| 摘要内容 | 摘要模型留下什么 | 代理提交了什么就是什么 |
+| 事后可检查 / 可检索 | 不能 | 能——事件、`blackboard_recall`、`/bb show`、`/bb export` |
+| 后台模型调用 | — | **无**（assist 需显式开启） |
 
 ## 目录
 
-- [为什么](#为什么)
 - [安装](#安装)
-- [打开 board 模式](#打开-board-模式)
-- [实际会看到什么](#实际会看到什么)
-- [怎么工作的](#怎么工作的)
-- [黑板长什么样](#黑板长什么样)
-- [越过摘要往回找](#越过摘要往回找)
-- [东西落在哪里](#东西落在哪里)
+- [模式](#模式)
+- [你会看到的循环](#你会看到的循环)
+- [压缩策略](#压缩策略)
+- [命令与工具](#命令与工具)
+- [数据布局与恢复](#数据布局与恢复)
+- [从 0.2 迁移](#从-02-迁移)
 - [配置](#配置)
-- [成本模型](#成本模型)
-- [兼容性](#兼容性)
-- [开发](#开发)
+- [成本](#成本)
+- [测试](#测试)
 - [已知局限](#已知局限)
-- [致谢与许可](#致谢与许可)
-
-## 为什么
-
-pi 的原生压缩会调用摘要模型，把旧历史压成一段文本。两个代价：
-
-1. **它是整条循环里最贵的一次调用。** 本地模型（W4A16 27B over PCIe）上 3 分钟内
-   跑不完。
-2. **它丢的正是压缩后干活要用的东西。** 文件路径、函数名、报错原文，散文摘要
-   最先改写或丢掉的就是这些。
-
-本包不做「更好的摘要」，而是换**信息源**：事实本来就在会话里，所以每回合由确定性
-代码挖出来，由代理自己审校（唯一需要语义判断的环节：正则分不出「这个决策已死」
-和「这个决策还有效」），一行一条落盘。压缩时把这个文件渲染成摘要。
+- [许可](#许可)
 
 ## 安装
 
-pi 可以自己 clone 到 `~/.pi/agent/git/github.com/113636xfh/…`，并把条目写进
-`~/.pi/agent/settings.json`：
-
 ```bash
-pi install git:github.com/113636xfh/pi-session-blackboard    # 用户级；-l 为项目级
-# 重启 pi —— 扩展在进程启动时加载
+pi install git:github.com/113636xfh/pi-session-blackboard    # 用户级；加 -l 为项目级
 ```
 
-想钉住版本就在末尾加 `@<tag 或 sha>`：`pi update --extensions` 会把已有 clone 对齐到
-配置的 ref，但不会把钉住的 ref 往前挪。
+pi 直接加载 `src/index.ts`，日常使用不需要构建。开发需要 `npm install`（pi 1.3.0 作为
+开发依赖被精确固定）以及 Node ≥ 22.19.0——这正是 pi 1.3 自身的要求。
 
-要读源码或改代码，就先 clone，再装本地路径：
+## 模式
 
-```bash
-git clone https://github.com/113636xfh/pi-session-blackboard.git
-pi install ./pi-session-blackboard      # pi 直接加载 src/index.ts —— 不需要 build
-```
-
-`npm install && npm test`（typecheck + 54 项 smoke）只在开发时需要。扩展是 TypeScript，
-由 pi 自己的扩展加载器加载，而 `@earendil-works/pi-coding-agent`、`typebox` 会被 alias
-到 pi 已安装的副本（`dist/core/extensions/loader.js` → `getAliases()`），所以本包
-**没有运行时依赖**。
-
-移除：`pi remove <pi list 显示的名字>`。
-
-如果在 `settings.json` 的 `packages` 里引用本包，必须用**裸字符串**形式：
-
-```jsonc
-{ "packages": ["git:github.com/113636xfh/pi-session-blackboard"] }   // ✅
-{ "packages": ["../../pi-session-blackboard"] }                      // ✅ 本地路径
-{ "packages": [{ "path": "../../pi-session-blackboard", "extensions": [] }] }  // ❌ 会禁用该包全部扩展
-```
-
-空数组 `extensions: []` 的含义是「显式不要任何扩展」，不是「不筛选」。
-用 `pi list` 检查，出现 `(filtered)` 标记就说明没加载上。
-
-## 打开 board 模式
-
-默认情况下本扩展只做**辅助**：原生压缩照跑，只是在 LLM 摘要末尾追加一节限量的
-黑板摘要。打开 board 模式只要改一个键，在 `~/.pi/agent/settings.json`（用户）或
-`.pi/settings.json`（项目，优先）：
-
-```jsonc
-{
-  "session-blackboard": {
-    "compaction": "board"      // 黑板即摘要；pi 的摘要调用被跳过
-  }
-}
-```
-
-三种模式：
-
-| `compaction` | 压缩时发生什么 |
+| `compaction` | 行为 |
 |---|---|
-| `"off"`（默认） | 原生流程原样跑；`compactAssist` 开着（默认）时在 LLM 摘要末尾追加一节限量的黑板摘要 |
-| `"digest"` | 原生流程原样跑；先把紧凑的黑板 digest 镜像进会话 JSONL |
-| `"board"` | **黑板作为摘要返回**——不调用摘要模型。内容太少的黑板（真实条目 < 3）返回 `null`，原生流程原样跑 |
+| `"off"`（默认） | 笔记与工具照常，压缩完全保持原生 |
+| `"board"` | **覆盖成立时**笔记即摘要；否则走原生并说明原因 |
+| `"digest"` | 仅为迁移保留：不再镜像 digest，并会给出提示 |
 
-## 实际会看到什么
+`compactAssist` 现在**默认关闭**。开启后它会运行 pi 自己的摘要并追加笔记，且只用于**手动**
+压缩且带自定义关注点的场景——这是确定性渲染唯一无法满足「按这个重点总结」的情况。
 
-**1. checkpoint 随你的下一条提示到达**（隐藏消息，`display: false`，TUI 保持
-干净）。它带确定性草稿、距压缩的倒计时，还有一句提示：*你在这里 commit 的就是
-摘要。*
+## 你会看到的循环
+
+**1. 隐藏提醒搭在你下一条消息上**（`display: false`，界面不会变脏）。接近压缩阈值时只提
+醒一次，且不带会过期的倒计时数字：
 
 ```
 [session-blackboard checkpoint]
-[context pressure] compaction is 3.3k away — context is at 95.0k of 131k tokens
-(pi compacts above 98.3k = window − reserve 32.8k). NEAR COMPACTION — commit what
-matters from this turn onto the board NOW …
-The draft's deterministic lines (`MODIFIED …` / `COMMIT …`) land automatically with
-your next commit — do NOT retype them; reject one with dropDraft=["substring"].
-Every other draft line lands ONLY if you write it yourself in `entries`.
---- draft ---
-## Files
-- MODIFIED src/board.ts (commitEntries, renderCommitEcho)
-- COMMIT 93c32ad 手动原生压缩按钮 /bb compact
-## Issues
-- [ERROR] npm test: smoke: FAIL 1/46
---- end draft ---
+NEAR COMPACTION: pause task expansion and write important changes now.
+Call blackboard action=review to inspect the complete candidates and receive a
+content-bound credential; commit useful notes and explicitly confirm the reviewed
+range. skip only discards the draft and does not confirm coverage.
 ```
 
-**2. 代理自己审校**，改正、删掉不对的，然后用 `blackboard` 提交：
+**2. 代理审校并提交**，一次调用同时完成两件事：
 
 ```jsonc
-{ "action": "commit", "entries": [
-  { "section": "decisions", "text": "commit 回执只返回新行 + 每节 2 条上下文",
-    "supersedes": "commit 返回整块黑板" }
-], "dropDraft": ["[ERROR] npm test"] }
+{ "action": "commit",
+  "entries": [
+    { "section": "decisions", "text": "覆盖绑定 pi 的切点，而不是整条分支",
+      "supersedes": "覆盖需要整条分支" }
+  ],
+  "review": { "id": "review-…", "constraintsChecked": true, "executionChecked": true, "goalChecked": true } }
 ```
 
-机械草稿不需要重打：确定性那几行（`MODIFIED …`、`COMMIT …`）随这次 commit 一起写入黑板，
-回执里标 `~`。回执本身很小：你的条目 `+`，自动接受的草稿行 `~`，前面各带同节最近的
-2 条（足够挑下一个 `supersedes` 的目标子串）：
+- `review` 可选；普通提交只是记笔记，**不等于**声明这段范围已审校。
+- 凭据由 `action: "review"` 发出，绑定到来源条目的内容指纹；一旦消息被 `/tree` 或
+  `context_edit` 改写，凭据立即失效，必须重新审校。
+- 每条笔记一行、内容完整——不会为了塞进预算而截断。放不进摘要预算的笔记会被当作
+  **问题**报出来，而不是被悄悄缩短。
+
+**3. 回执很小，且按条目 ID 说话**：
 
 ```
-Committed 3 entries (2 auto-accepted from the mechanical draft). Blackboard v7.
-1 draft line did NOT land (draftOnCommit="deterministic" leaves them to you) — the draft is now cleared; rewrite them in the next commit if they matter.
-Replaced entries archived → archive/<sid>/superseded-20261008-134102.md (still searchable via blackboard_recall).
-
-Board after commit — your entries (+) and auto-accepted draft lines (~), each preceded by its 2 nearest older entries:
-
-## Decisions — 1 new
-  [2026-10-08 13:02] board 模式把黑板作为摘要返回
-  [2026-10-08 13:20] supersedes 必须给唯一子串
-+ [2026-10-08 13:41] commit 回执只返回新行 + 每节 2 条上下文
-
-## Files — 2 new
-  [2026-10-08 13:02] MODIFIED src/summary.ts (renderSummary)
-  [2026-10-08 13:20] MODIFIED src/recall.ts (searchDigest)
-~ [2026-10-08 13:41] MODIFIED src/board.ts (commitEntries, renderCommitEcho)
-~ [2026-10-08 13:41] COMMIT 93c32ad 手动原生压缩按钮 /bb compact
-
-Full board: ~/.pi/agent/blackboard/<sid>.md — use action="show" or blackboard_recall, do not re-read the file.
+Committed v7.
+m-4f2a9c1e5b7d@2 [decisions] 覆盖绑定 pi 的切点，而不是整条分支
+Use blackboard show/recall or /bb; there is no default board file.
 ```
 
-**3. `/bb` 随时看状态：**
+## 压缩策略
 
-```
-blackboard: ~/.pi/agent/blackboard/<sid>.md
-v7 | updated: 2026-10-08 13:41 | entries: 22 (+3 archive pointers) | turns since checkpoint: 1 | pending draft: 4 lines
-compaction: board | 3.3k tokens left until pi's native trigger
-```
+`"board"` 模式下 `session_before_compact` 只问一个问题：*笔记是否覆盖了这次准备真正丢弃
+的条目？* 只有 `preparation.firstKeptEntryId` 之前的内容算数——保留尾部不需要重新总结。
 
-## 怎么工作的
-
-![每回合的审校循环](docs/images/01-loop-zh.png)
-
-三个部件，只有第二个涉及模型：
-
-1. **抽取——确定性，每回合。** 纯 TS 只扫游标之后的*新增*会话条目：goal/scope、
-   偏好、成功 `edit`/`write` 产生的 `MODIFIED <path> (导出符号)`、成功
-   `git commit` 产生的 `COMMIT <hash> <subject>`、失败 shell 的
-   `[ERROR] <cmd>: <首行报错>`、助手文本里的 decision/finding/next 句式。
-   毫秒级完成，不发网络请求。
-2. **审校——代理自己，在它自己的回合里。** 草稿随你下一条消息注入
-   （`delivery: "next-turn"`，零额外 API 调用），或以 steer 消息立即触发
-   （`"immediate"`）。代理审校之后 commit 留下来的那些，或者 skip。
-3. **归档——机械。** 每节溢出确定性轮转进 append-only 归档文件；每次 commit 都把
-   紧凑 digest 镜像进会话 JSONL（`sbb-snapshot` custom entry，永不进入 LLM 上下文，
-   永久可搜）。
-
-开放 issue 引用的文件后来被改过，扩展会给它标上 `[RESOLVED <ts>]`。
-
-### 草稿和 commit 是一次调用
-
-机械抽取从不直接写黑板，它填的是一份**待审草稿**。以前的做法是：草稿展示出来，然后
-被丢弃，所以一条抽取到的事实能不能活下来，取决于代理有没有重新打字写一遍。
-实测 70 份 debug 日志 + 26 块真实黑板：258 个回合产出 **2013 行草稿**，发生了
-143 次 commit，而黑板上只留下 **12 行** `MODIFIED`/`COMMIT`，模型自己写的有 528 行
-（2.2%）。丢得最干净的正是这些确定性事实；其余的行重打一遍要花输出 token
-（草稿均值 7.6 行、中位 5、p90 17、最大 45）。
-
-现在一次 commit 同时带两部分：
-
-| 部分 | 是什么 |
+| 情形 | 处理 |
 |---|---|
-| `entries` | 代理自己写的——它的决策、发现、更正 |
-| 自动接受的草稿行 | `draftOnCommit: "deterministic"`（默认）：只含零启发式的抽取输出，即 `MODIFIED <path> (符号)` 和 `COMMIT <hash> <subject>` |
-| `dropDraft: ["子串"]` | 代理**拒绝**的草稿行——大小写不敏感，不用重打 |
+| 覆盖成立且摘要放得下 | 笔记作为摘要返回，**零**摘要模型调用 |
+| 有缺口、配额未用尽、余量可测 | 返回 `{ cancel: true }`，由**正在运行的这个回合**投递一次仅限记忆工具的补写请求（`agent_before_settle` + `continue`），绝不在钩子内部递归调用模型 |
+| 有缺口、配额用尽 | 走原生摘要，并在界面、事件日志与诊断日志中写明原因 |
+| 上下文已 overflow | 走原生——没有余量再做补写回合 |
+| 手动压缩且带自定义关注点 | 若开启 `compactAssist`，用它满足关注点；否则确定性渲染 |
+| 显式要求原生（`/bb native`） | 遵从一次，5 分钟 TTL 后自动清理 |
+| 用户中断 | 不会偷偷续跑；已用掉的配额不退还，`/bb cancel-repair` 停止后续追问 |
 
-启发式抽取那几类（助手句式挖出的 decisions/findings/next、`[ERROR]` 行、偏好句式、
-scope 变化）故意仍要代理自己写：它们只是起点，而且确实会误报。
-`draftOnCommit: "all"` 翻转默认值：整块草稿写入黑板，代理只负责剔；`"none"` 回到全部重打。
+补写配额是**每个压缩世代最多两次请求**，写在事件日志里。重启 pi、再次进入阈值检查、工具
+调用失败都不会清零。只有请求真的到达 provider（`context` 事件）才记为「已送达」，所以
+「我们发了」和「模型看到了」是两个不同状态。补写请求期间只有记忆工具可用，并在其后结束
+该回合——这个边界是成本可控的原因。
 
-不管哪种策略，commit 都会清空草稿，并在回执里说明**有多少行没写入黑板**，所以漏掉的
-事实看得见，不会静默发生。
+## 命令与工具
 
-### 压缩：黑板即摘要
+| 入口 | 用途 |
+|---|---|
+| `blackboard` 工具 | `commit`、`review`、`retain`、`show`、`archive`、`skip` |
+| `blackboard_recall` 工具 | 字面检索；`mode: current \| history \| session`、`limit`、`cursor` |
+| `/bb` | `show [section] [limit] [offset]`、`show <ID>`、`review`、`commit <JSON>`、`retain <ID> <revision>`、`archive <ID>`、`skip`、`reset`、`migrate [apply]`、`export --format markdown [--output "路径"] [--overwrite]`、`native`、`cancel-repair`、`debug`、`off`、`on`、`status` |
 
-![压缩接管：黑板即摘要](docs/images/02-compaction-zh.png)
+`off` / `on` 是手动旋钮。它在本分支写入一条事件日志，因此不是进程内存：恢复或继续该会话时
+重放分支就仍是禁用状态，`session_start` 会重新播报这个状态。关闭期间是完全关闭——两个工具退出
+模型可见集合、不再抽取或注入笔记、压缩回退到 pi 原生摘要。`/bb` 本身仍然可用，所以 `/bb on`
+和 `/bb status` 照常工作。旋钮只能把插件往关闭方向调，永远不会覆盖 `session-blackboard.enabled: false`。
 
-`session_before_compact` 返回：
+两个方向都会先确认并说清代价：两个工具 schema 进出请求的工具块，而聊天模板把工具块渲染在
+prompt 最前部，所以下一次请求会重新 prefill 整段上下文（会显示当前 token 数）。这是实测而非推断：
+消息列表仍是纯追加时，仅工具集变化也会使 `cached_tokens = 0`。
 
-```ts
-{ compaction: { summary: renderSummary(board),   // pi 自己的分节形状
-                firstKeptEntryId, tokensBefore } }
-```
+因为历史里的工具调用还在，模型仍可能去调黑板工具。`/bb off` 后的第一个回合会带上一句短声明
+——`[session-blackboard] Disabled on this branch; do not call its tools.`——，它是一条真实的
+会话消息，且送达记录写进事件日志，因此不会重复：后续回合不会，恢复会话也不会。一次成功的
+压缩会退役它，新一代只会再拿到一条。关闭期间，模型可见投影还会丢掉本插件自己的旧提示。
+来自历史的误调会被阻断并给出原因，而不是执行。
 
-- **跳过** pi 的摘要调用，不是再跑一次；
-- 其余全是 pi 的：切点、`keepRecentTokens` 保留尾部、compaction entry、投影重建；
-- 按 pi 原生摘要的分节名渲染（`## Goal`、`## Constraints & Preferences`、
-  `## Key Decisions`、`## Key Findings`、`## Files & Changes`、`## Open Issues`、
-  `## Next Steps`），外加页脚：黑板文件路径 + 归档目录 + `blackboard_recall` 用法；
-- **页脚先预留再截断**：黑板超过 `summaryMaxChars` 时丢最老的正文行，检索指引永不丢；
-- **黑板内容少，摘要也不会跟着变薄**：真实条目 < 3 → 返回 `null` → 原生流程原样跑。
-  读取/渲染异常同样回退。
+分页是真实的：某一页没有命中时会明说「扫描尚未结束」并给出游标；只有扫描完成才允许说
+「没有匹配」。游标绑定分支叶节点与笔记版本，分支变化会让游标失效，而不是悄悄返回旧行。
+`history` 模式会显示被替换的版本及其状态——已失效的笔记不会伪装成当前事实。
 
-### `/bb compact`：手动原生压缩按钮
+## 数据布局与恢复
 
-一个开关让**下一次**压缩走 pi 自己的摘要，即便当前是 `"board"` 模式：
+- **权威来源**：会话 JSONL 里的 `sbb-event` 自定义条目。它们挂在会话树上，所以 `/tree`、
+  fork、clone、reset 继承的都是真实祖先，被放弃的分支不会污染当前摘要。
+- **派生物**：每次读取都从事件重建投影，增量投影器复用未变化的前缀。磁盘上不写投影缓存，所以没有需要修复或需要信任的缓存。
+- **仅显式**：Markdown。`/bb export` 写出可校验的快照，手工修改永不会被导回，也不会自动
+  维护会话 Markdown 黑板。
 
-1. 命令在 state 文件里埋一个**一次性**标记（5 分钟 TTL，取消压缩不会留下过期旁路）；
-2. `session_before_compact` 看到它就返回 `undefined` → pi 原生流程原样跑
-   （切点、保留尾部、重试策略都是 pi 的）；
-3. 然后 `session_compact` 把那份原生摘要**合并回黑板**。
+恢复：缓存损坏或缺失会被忽略（状态从事件重放）；会话本身损坏时停止接管并报错，而不是写
+一块空板；迁移中断可幂等重试，字节级备份始终保留。同一会话不允许两个 pi 进程同时写：第二
+个直接被拒绝，而不是做「最后写覆盖」。
 
-所以这一次会花一次模型调用，而黑板仍然拿到结果。想永久走原生，把配置改成
-`"compaction": "off"`。
+## 从 0.2 迁移
 
-### 收编：原生摘要不浪费
+`/bb migrate` 是 dry run：列出文件、大小、哈希、候选条目和缺失的归档指针，**不写任何
+东西**。`/bb migrate apply` 先把旧黑板、状态与归档复制到 `backups/<sid>/<hash>/` 并逐字节
+校验，然后把内容作为 **legacy/unscoped、unknown** 笔记导入。
 
-在 `session_start` 和 `session_compact`，pi 自己产生的摘要（启用扩展之前的旧会话
-历史，或因黑板内容少而回退时产生的）会被解析成黑板条目并**合并**进来，按时间
-顺序。三条规则保证合并安全：
+legacy 笔记**不是**当前事实：在审校前不进入摘要渲染；未知分节与散行会被原样保留，不会丢
+弃。迁移之前 `/bb show` 会提示存在旧黑板且它不是权威来源。
 
-- 自己生成的摘要一律拒绝（标题里有标记），所以黑板模式压缩不会把自己解析回自己；
-- **每次合并每节最多 6 条**（留最新），超出部分进**单个** `adopted-<stamp>.md`；
-- 大小写不敏感的精确去重，黑板上的和归档文件里的行都算已知，所以重复合并是 no-op。
-
-### 倒计时
-
-每条 checkpoint 消息都带距压缩还有多远，算法与 pi 一致：`contextWindow − reserveTokens`，
-`reserveTokens` 按 model override → 项目设置 → 用户设置 → pi 内置 16384 依次解析。
-剩余进入 `compactionWarnTokens`（默认 32768）之后，checkpoint 改为**每回合**投递
-（草稿为空也照样提醒），因为下一回合可能就是黑板变成摘要之前的最后一回合。
-token 数未知时（刚压缩完、下一条回复还没来）不打印任何行，而不是打一个猜出来的
-警报。
-
-## 黑板长什么样
-
-一行一条事实，自动打时间戳，上限 `maxEntryChars`（300）：
-
-```markdown
-## Decisions
-- [2026-10-08 13:02] board 模式把黑板作为摘要返回：pi 的切点和保留尾部仍是 pi 的
-```
-
-| 节 | 里面放什么 | 谁写 |
-|---|---|---|
-| `Goal` | 开场任务；之后只收显式转向（`instead`、`actually`、`switch to`…）的 `[Scope change]` | 抽取 + 审校 |
-| `Decisions` | 选择**和理由**——审校环节决定它值不值得读 | 代理为主 |
-| `Findings` | 探索/实验的结论：实测数字、根因、坑 | 代理为主 |
-| `Files` | `MODIFIED <path> (导出符号)` 和 `COMMIT <hash> <subject>` —— 默认随每次 commit 自动写入黑板 | 确定性 |
-| `Issues` | `[ERROR] <cmd>: <首行报错>`；文件被修好时自动 `[RESOLVED <ts>]` | 抽取 + 审校 |
-| `Next` | 具体的下一步 | 抽取 + 审校 |
-| `Prefs` | 「always / never / prefer / 请用…」类表述 | 抽取 + 审校 |
-| `Archived` | 归档文件指针，扩展管理，每节最多 5 行 | 扩展 |
-
-**事实变了，黑板上不能留两个版本。** `commit` 只在精确匹配时去重，所以改一条而不带
-`supersedes`，旧行会留在新行旁边，摘要就会同时携带两版。`supersedes` 给出被替换行的
-唯一子串：旧行在同一次调用里归档（一次 commit 一个文件，仍可 recall），`## Archived`
-落一行指针，新行成为摘要能显示的唯一版本。目标歧义或找不到都会回报（新行照样落），
-代理可以用更长子串重试。
-
-## 越过摘要往回找
-
-黑板成为摘要之后，模型需要能读到摘要之下的内容。`blackboard_recall` 大小写不敏感
-地依次搜：当前黑板 → 归档文件（新到老，最多 40 个）→ 镜像的 `sbb-snapshot` digest。
-
-查询是**从对话里抄出来的字面子串**（路径、标识符、报错片段），不是自然语言问题。
-每条命中一行，带来源定位，最新在后：
-
-```
-blackboard recall — 3 match(es) for "reserveTokens" (newest last):
-- [board · Decisions] - [2026-10-08 13:02] 倒计时镜像 pi 的 reserve 解析 …
-- [archive/board-20261002-064611220-0005.md · From: Goal] - [2026-10-02 14:46] …
-- [snapshot/2291@07-11-24 · Goal] 主线：…
-```
-
-digest 的命中会归属到它来自哪个黑板节（`recentFiles` 报 `Files`）；数字和 `counts`
-对象跳过，因为匹配到计数只是噪声。`full: true` 输出整块 snapshot（要的是黑板状态
-而不是单条事实时）。
-
-## 东西落在哪里
-
-这些你从不需要管理。黑板只由 `blackboard` 工具在代理 commit 时写：
-
-| 路径 | 谁写 | 内容 |
-|---|---|---|
-| `<boardDir>/<sessionId>.md` | `blackboard` 工具（commit） | **黑板** —— 纯 markdown，分节顺序稳定，每节有上限 |
-| `<boardDir>/archive/<sessionId>/board-<stamp>.md` | 轮转 | 每次溢出一个文件，append-only |
-| `<boardDir>/archive/<sessionId>/superseded-<stamp>.md` | `supersedes` | 一次 commit 里被替换的条目 |
-| `<boardDir>/archive/<sessionId>/adopted-<stamp>.md` | 收编 | 超出每次合并额度的条目 |
-| `<boardDir>/state/<sessionId>.json` | 扩展 | 抽取游标、待审草稿、计数器（tmp+rename 原子写） |
-| `<boardDir>/debug/<sessionId>.ndjson` | 扩展，仅 `"debugLog": true` | 事件日志 |
-| 会话 JSONL（`sbb-snapshot`） | 扩展，`mirrorToSession` | 紧凑 digest，recall 可搜 |
-
-默认 `<boardDir>` 是 `<pi agent dir>/blackboard`。状态、草稿、镜像、digest
-**永不进入模型上下文**：它们是文件和 JSONL custom entry，可 grep、可 commit、
-可以用普通 `read` 工具读（例如压缩之后）。
+回退：卸载（或固定版本）本包并重新启用 0.2；想留一份笔记副本就先
+`/bb export --output <路径>`。v2 事件留在会话文件里，0.2 会忽略它们。这里不会升级你的全局
+pi。
 
 ## 配置
 
-`~/.pi/agent/settings.json`（用户）或 `.pi/settings.json`（项目，逐键覆盖）里的
-`"session-blackboard"`：
+`~/.pi/agent/settings.json`（用户）或 `.pi/settings.json`（项目，优先），键
+`session-blackboard`：
 
-```jsonc
-{
-  "session-blackboard": {
-    "enabled": true,
-    "checkpointTurns": 1,
-    "delivery": "next-turn",
-    "compaction": "off",
-    "compactionWarnTokens": 32768,
-    "maxEntriesPerSection": 40,
-    "maxEntryChars": 300,
-    "maxDraftLines": 60,
-    "draftOnCommit": "deterministic",
-    "commitContextEntries": 2,
-    "summaryMaxChars": 6000,
-    "compactAssist": true,
-    "compactAssistMaxChars": 4000,
-    "seedFromPriorSummary": true,
-    "mirrorToSession": true,
-    "boardDir": "~/.pi/agent/blackboard",
-    "debugLog": false
-  }
-}
-```
-
-| 键 | 默认 | 说明 |
+| 键 | 默认 | 含义 |
 |---|---|---|
-| `enabled` | `true` | 主开关；`false` 还会主动**停用**工具（pi 会自动激活扩展注册的工具） |
-| `checkpointTurns` | `1` | 审校节奏（用户回合数）。抽取和 `[RESOLVED]` 标记仍每回合跑。嫌吵调到 3–10 |
-| `delivery` | `"next-turn"` | `"next-turn"`：草稿随下一条消息注入（零额外 LLM 调用）。`"immediate"`：立即派发 steer 触发一轮审校——适合「下一条用户消息」还很远的无人值守运行 |
-| `compaction` | `"off"` | `"board"` 就是本包要开的那个模式，见[打开 board 模式](#打开-board-模式) |
-| `compactionWarnTokens` | `32768` | 距压缩低于此 token 数即进入临近区（每回合投递 + 倒计时）。`0` 关闭 |
-| `maxEntriesPerSection` | `40` | 每节轮转阈值 |
-| `maxEntryChars` | `300` | 每条上限（收编外来摘要时放宽到 600：硬切在理由中间会丢掉关键部分） |
-| `maxDraftLines` | `60` | checkpoint 渲染的草稿大小上限 |
-| `draftOnCommit` | `"deterministic"` | 哪些草稿行随 commit 自动写入黑板而不必重打：`"none"` / `"deterministic"`（只 `MODIFIED`+`COMMIT`）/ `"all"`（代理用 `dropDraft` 剔） |
-| `commitContextEntries` | `2` | commit 回执里每节回带多少条旧行做上下文。`0` = 只回新行 |
-| `summaryMaxChars` | 6000 | 黑板渲染为摘要的硬上限（页脚先预留） |
-| `compactAssist` / `compactAssistMaxChars` | `true` / `4000` | legacy 辅助路径（见下） |
-| `seedFromPriorSummary` | `true` | 把原生摘要合并进黑板 |
-| `mirrorToSession` | `true` | 紧凑 digest 追加进会话 JSONL |
-| `boardDir` | `<agent dir>/blackboard` | 绝对路径，或相对 pi agent 目录 |
-| `debugLog` | `false` | ndjson 事件日志——看哪些钩子真的跑过，这是最快的办法 |
+| `enabled` | `true` | 设为 `false` 同时把两个工具从模型工具集中移除并停止注入。运行时等价物是 `/bb off`，作用于分支且恢复会话后仍生效 |
+| `compaction` | `"off"` | `off` / `board` / `digest`（仅迁移） |
+| `checkpointTurns` | `1` | 提醒间隔（回合） |
+| `contextPressure` | `false` | 在提醒里注入「距压缩还有多少上下文」的倒计时；默认关，因为这个数字不可执行 |
+| `summaryMaxChars` | `6000` | 渲染摘要的精确字符上限 |
+| `compactAssist` | `false` | 显式开启「原生摘要 + 笔记」（手动自定义关注点） |
+| `compactAssistMaxChars` | `4000` | 追加笔记块的上限 |
+| `compactionWarnTokens` | `32768` | 接近阈值的预警区间；`0` 关闭 |
+| `draftOnCommit` | `"deterministic"` | 哪些机械草稿行随提交一起落盘 |
+| `delivery` | `"next-turn"` | 提醒搭载下一个用户消息（`next-turn`）还是立即 steer |
+| `maxEntriesPerSection` | `40` | 每分节条目预算，超出后确定性归档 |
+| `maxEntryChars` | `300` | 单条提交笔记的字符上限 |
+| `maxDraftLines` | `60` | 单次 checkpoint 渲染的草稿行上限 |
+| `commitContextEntries` | `2` | 提交回执旁回显的已有条目数（`0` = 只回显新增） |
+| `debugLog` | `false` | 在 `sbb-debug` 条目中记录原因与计数（从不记录原文） |
+| `boardDir` | `<agentDir>/blackboard` | 写者锁与迁移备份的位置 |
 
-### Legacy：compaction assist
+已废弃的键（`mirrorToSession`、`seedFromPriorSummary`）会在每个会话提示一次，而不是悄悄
+失效。
 
-`compactAssist`（默认开；一旦 `"compaction": "board"` 就无关）调用 harness 会调用的
-*同一个*导出 `compact()`（相同模型、prompt、保留尾部），并在摘要末尾追加一节限量的
-黑板内容（goal ≤3、开放 issues ≤5、files ≤5、next ≤3、各节统计、黑板文件与归档
-目录指针）。所有失败分支都返回 `undefined`：原生流程原样跑，用它自己的重试策略。
+## 成本
 
-## 成本模型
+- 普通回合：本扩展 **零** 模型调用，提醒搭载在已有请求上。
+- 覆盖成立的压缩：**零** 摘要调用，无额外请求。
+- 覆盖不成立的压缩：最多 **2** 次仅限记忆工具的额外请求，然后走原生。每次都被限制在记忆
+  工具并结束该回合。
+- 开启 `compactAssist`，或手动压缩带自定义关注点：**一次** 摘要调用（「assist」就是这个
+  意思）。
+- 检索、导出、审校：完全本地。
 
-| 工作负载 | 本扩展 |
-|---|---|
-| 后台 LLM 调用 | **永远没有** |
-| 额外 prefill | 无（抽取纯 CPU） |
-| prompt 开销 | checkpoint 消息（~1–3k tokens，追加在尾部，前缀缓存完好）+ 很小的 commit 回执；自动接受的草稿行**不花**代理的输出 token |
-| 归档 | 确定性文件轮转 |
-| 压缩 | `"board"`：渲染黑板作为摘要，跳过 pi 的摘要调用（内容少 → 原生）；`"off"`/`"digest"`：原生，可选追加节 / 镜像 digest |
-
-## 兼容性
-
-- pi ≥ 0.84（按 0.84.x 扩展 API 开发：`agent_settled`、`before_agent_start`、
-  `session_before_compact`、`session_compact`、`session_start`、`pi.registerTool`、
-  `pi.registerCommand`、`pi.appendEntry`、`pi.sendMessage`）。
-- **零运行时依赖**：只 import `node:*`、`typebox`、`@earendil-works/pi-coding-agent`，
-  全部由 pi 的扩展加载器解析。
-- **Node ≥ 22。** pi 自己的包 import 了 `node:fs` 的 `globSync`（Node 22 才有），
-  所以测试套件在 Node 20 上连依赖都加载不了，CI 因此跑 22.x 和 24.x，
-  `engines.node` 写的是 `>=22`。
-- TypeScript strict；`npm install && npm run typecheck`。
-
-## 开发
+## 测试
 
 ```bash
-npm install          # 只有 devDependencies；扩展本身零运行时依赖
-npm run typecheck    # tsc --noEmit
-npm test             # build (tsc → build/) + node test/smoke.mjs   （54 项断言）
-npm run docs:render  # SVG → PNG（resvg，确定性，无浏览器）
+npm run typecheck
+npm test            # smoke + 事件日志 + 可靠性 + 导入 + 运行时 + 故障注入 + 平台
+                    # + 真实 SDK 契约 + eval / long-eval / 基准边界闸门
+npm run test:known  # 曾经的失败复现，保留作回归护栏
 ```
 
-smoke 套件断言的是决定「压缩后模型看到什么」的纯函数：黑板→摘要渲染、recall 搜索、
-commit + supersedes + 轮转 + 指针上限、收编解析、倒计时数学、legacy assist 节。
-钩子、checkpoint 注入、压缩交接由真实 pi 会话验证，不在套件里。
-
-图源在 `docs/src/*.svg`（`-en` / `-zh` 成对）；GitHub 渲染的是提交进仓库的
-`docs/images/` PNG。
-
-> **仓库路径里带 `&` 会让 Windows 上的 npm 脚本失败。** npm 把
-> `node_modules\.bin` 里的 shim 解析成含 `&` 的绝对路径，cmd.exe 把它当命令分隔符，
-> 于是报 `'D:\…\node_modules\.bin\' is not recognized`。所以 `build`/`typecheck`
-> 走 `node ./node_modules/typescript/bin/tsc`，而不是裸 `tsc`。
-
-`tsconfig.json` 是便携配置。`tsconfig.check.json` / `tsconfig.build.json` 是本机助手
-（把 `@earendil-works/*` 和 `typebox` 映射到现成安装），故意 git-ignore。
+真实 SDK 测试把本仓库的 `src/index.ts` 装进 pi 1.3.0，模型用进程内固定流。这些测试里
+`fetch` 会直接抛错，并断言从未被调用。CI 在 Linux 与 Windows、Node 22.19.0 与 24 上运行。
 
 ## 已知局限
 
-- **board 模式是拿摘要质量换成本和确定性。** LLM 摘要会重新叙事，黑板渲染的是
-  提交过的行；你丢的是那层叙事：语气、保留余地、没成形的推理，以及任何没写下来
-  的东西。没有东西被删掉：pi 的保留尾部仍是逐字原文，被替换和被轮转的行都在盘上，
-  `blackboard_recall` / `/bb show` 能让代理读回来。宁愿花那次模型调用就设
-  `compaction: "off"`（默认），pi 的原生摘要照旧。
-- **审校是 prompt 强制，不是硬保证。** 模型可以忽略 checkpoint。缓解：最多重注 3 次
-  + 可见警告；下个用户回合重新触发。临近压缩的提醒不消耗这 3 次额度。
-- **助手文本挖掘（decisions/next/findings）故意轻且限量，** 只当审校的起点用。
-- **自动写入黑板的 `Files` 行没经过审校。** 它们来自工具参数（哪个文件、哪个导出符号、
-  哪个 commit 哈希），所以是精确的，但不一定相关：碰了 30 个文件的会话就会产出
-  30 行。想让每一行都过代理的手，就设 `draftOnCommit: "none"`。
-- **`[ERROR]` 抽取器是对原始工具输出的启发式，确实会误报。** 实测过：测试输出里回显的
-  `[ERROR]` 行；`grep -c` 零匹配导致退出码 1（测试其实*通过*了）。审校环节是缓解手段；
-  抽取会继续犯这类错。
-- **`[Scope change]` 需要显式转向词。** 实测「含任务动词就算转向」的旧规则在 5 条普通
-  跟进消息里命中 4 条，所以收紧了；代价是安静的方向变化只能靠代理兜住。
-- **每个 session id 一块黑板。** 会话结束后黑板是可保留/可 grep/可删的文件
-  （`/bb reset` 只碰当前会话）。
-- **无跨会话召回。** `blackboard_recall` 覆盖的是本会话的当前黑板 + 归档 + 镜像 digest。
-  更早的东西请自己 grep `blackboard/` 目录。
-- **`blackboard_recall` 最多读 40 个最新归档文件**，超出会在结果里说明。超长会话
-  应该直接 grep 归档目录。
-- **摘要的好坏等于黑板的好坏。** 从不 commit 的会话只会有一块内容很少的黑板，
-  而这样的黑板会故意回退到 pi 的原生摘要，而不是产出一份没用的摘要。
+- 确定性渲染不会重新叙事。没写下来的语气、保留余地、半成形推理都留不下来；保留尾部仍是
+  原文，其余就看笔记里有什么。
+- 覆盖是**结构性**的：它证明某段来源在某个内容指纹下被审校过，不证明笔记语义正确。
+- 超出摘要预算的笔记必须由模型重写；一条超长的受保护笔记会一直阻止接管，直到它被缩短或
+  保留资格到期。
+- 手动压缩遇到缺口时这一版会退回原生：目前没有安全办法把补写回合交还给用户主动发起的
+  压缩。
+- 不做跨进程合并，第二个写者会被拒绝。
+- `/bb off` 和 `/bb on` 各付一次全量重 prefill：工具块变了，而聊天模板把它渲染在 prompt 最前部。实测：两个方向都是 `cached_tokens = 0`。
+- 旧归档可以被检索，但永远是 unscoped；不会去推断它们属于哪条分支。
 
-## 致谢与许可
+- [契约差异：0.2 → 0.3](docs/CONTRACT.md)；`npm run release:check` 是一键本地检查入口。
 
-Goal/scope-change 与偏好抽取模式改编自
-**[@monotykamary/pi-vcc](https://github.com/monotykamary/pi-vcc)**（MIT）。
-「确定性抽取 + 代理审校 + 黑板即摘要」的设计是本包的。
+## 许可
 
-MIT — 见 [LICENSE](./LICENSE)。变更：[CHANGELOG.md](CHANGELOG.md)。
+MIT。

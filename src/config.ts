@@ -12,6 +12,13 @@ export type SbbConfig = {
 	 */
 	checkpointTurns: number;
 	/**
+	 * Inject the "[context pressure] compaction is X away" countdown into the
+	 * checkpoint. Off by default: the number is not actionable, and it competes
+	 * with the review request itself for the agent's attention. Set true to get
+	 * the countdown and the NEAR COMPACTION instruction back.
+	 */
+	contextPressure: boolean;
+	/**
 	 * How the checkpoint reaches the agent:
 	 *  - "next-turn": injected with the next user message (zero extra LLM calls)
 	 *  - "immediate": a steer message triggers a review turn now (small extra LLM call)
@@ -80,19 +87,43 @@ export type SbbConfig = {
 	 */
 	compactionWarnTokens: number;
 	debugLog: boolean;
+	/** Migration/compatibility notes for the loaded settings (surfaced once per session). */
+	hints?: string[];
 };
+
+/**
+ * Behaviour that changed with the event-backed schema. Pure so it is testable and so the
+ * caller decides when to show it.
+ */
+export function describeSettingHints(raw: Record<string, unknown>, cfg: SbbConfig): string[] {
+	const hints: string[] = [];
+	if (cfg.compactAssist && cfg.compaction === "board") {
+		hints.push('compactAssist=true adds a summarization model call; with compaction="board" the board alone is enough for threshold compactions. It is now used only for manual compaction that carries custom instructions.');
+	}
+	if (cfg.compaction === "digest") {
+		hints.push('compaction="digest" no longer mirrors a board digest; session notes live in authoritative session events. Use "board" for takeover or "off" to leave compaction alone.');
+	}
+	if (Object.hasOwn(raw, "mirrorToSession")) {
+		hints.push('mirrorToSession is obsolete: notes are stored as session events, not mirrored digests.');
+	}
+	if (Object.hasOwn(raw, "seedFromPriorSummary")) {
+		hints.push('seedFromPriorSummary is obsolete: summaries not produced by this extension are imported once, with their source reference.');
+	}
+	return hints;
+}
 
 const SETTINGS_KEY = "session-blackboard";
 
 export const DEFAULTS: SbbConfig = {
 	enabled: true,
 	checkpointTurns: 1,
+	contextPressure: false,
 	delivery: "next-turn",
 	maxEntriesPerSection: 40,
 	boardDir: join(getAgentDir(), "blackboard"),
 	mirrorToSession: true,
 	compaction: "off",
-	compactAssist: true,
+	compactAssist: false,
 	compactAssistMaxChars: 4000,
 	summaryMaxChars: 6000,
 	maxEntryChars: 300,
@@ -255,6 +286,7 @@ export function loadConfig(cwd: string): SbbConfig {
 	const cfg: SbbConfig = { ...DEFAULTS };
 	cfg.enabled = pickBool(all, "enabled", cfg.enabled);
 	cfg.checkpointTurns = Math.max(1, Math.floor(pickNum(all, "checkpointTurns", cfg.checkpointTurns)));
+	cfg.contextPressure = pickBool(all, "contextPressure", cfg.contextPressure);
 	cfg.delivery = pickStr(all, "delivery", cfg.delivery) === "immediate" ? "immediate" : "next-turn";
 	cfg.maxEntriesPerSection = Math.max(5, Math.floor(pickNum(all, "maxEntriesPerSection", cfg.maxEntriesPerSection)));
 	cfg.maxEntryChars = Math.max(100, Math.floor(pickNum(all, "maxEntryChars", cfg.maxEntryChars)));
@@ -272,6 +304,7 @@ export function loadConfig(cwd: string): SbbConfig {
 		: "off";
 	cfg.summaryMaxChars = Math.max(1000, Math.floor(pickNum(all, "summaryMaxChars", cfg.summaryMaxChars)));
 	cfg.compactAssist = pickBool(all, "compactAssist", cfg.compactAssist);
+	cfg.hints = describeSettingHints(all, cfg);
 	cfg.compactAssistMaxChars = Math.max(500, Math.floor(pickNum(all, "compactAssistMaxChars", cfg.compactAssistMaxChars)));
 	cfg.debugLog = pickBool(all, "debugLog", cfg.debugLog);
 

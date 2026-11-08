@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import type { Board, BoardEntry, DraftSections, PendingDraft, Section } from "./types.js";
 import { SECTION_HEADERS, SECTIONS } from "./types.js";
 import { archiveDir, boardPath, safeSid, statePath } from "./paths.js";
+import { parseNativeSummary, routeHeading } from "./summary-import.js";
 
 /** "2026-08-28 21:40" local time for entry timestamps. */
 export function nowLocal(): string {
@@ -89,8 +90,14 @@ export function countAll(b: Board): number {
 /** Marks a summary this extension produced (so it is never adopted back in). */
 export const BOARD_SUMMARY_MARKER = "# Session context checkpoint";
 
-/** Below this many real entries the board is not trusted as the summary. */
+/** Legacy rendering floor only; entry count is not proof of safe compaction. */
 export const BOARD_SUMMARY_FLOOR = 3;
+
+/** Transitional minimum context check; v2 additionally requires explicit coverage. */
+export function hasSummaryContext(board: Board): boolean {
+	const real = (section: Section) => board.sections[section].some((entry) => entry.text.trim() && !entry.text.startsWith("(archived)"));
+	return real("goal") && ["next", "issues", "decisions", "findings"].some((s) => real(s as Section));
+}
 
 /** Real (non-pointer) entries on the board. */
 export function countReal(b: Board): number {
@@ -114,77 +121,14 @@ export function countReal(b: Board): number {
 // dropped: a slightly wrong section is recoverable at the next checkpoint,
 // a lost fact is not.
 
-const SUMMARY_HEADER_ROUTES: [RegExp, Section][] = [
-	[/scope change|goal|objective|目标|目的|task/i, "goal"],
-	[/preference|constraint|偏好|约束|style|rule/i, "prefs"],
-	[/next|todo|follow.?up|下一步|后续|待办/i, "next"],
-	[/issue|problem|blocker|error|bug|风险|问题|阻塞|失败|未解决|待解决/i, "issues"],
-	[/file|change|artifact|path|edit|文件|改动|修改|progress|done|completed|提交/i, "files"],
-	[/decision|choice|trade.?off|选择|决定|方案/i, "decisions"],
-	[/finding|learned|discovered|lesson|发现|结论|实测/i, "findings"],
-];
-
-// NOTE: no \b around CJK alternatives — CJK chars are not \w in JS, so a CJK
-// word glued to other CJK text (no punctuation) never gets a word boundary.
-const SUMMARY_CONTENT_ROUTES: [RegExp, Section][] = [
-	[/next step|next up|\btodo\b|下一步|接下来/i, "next"],
-	[/error|failed|exception|enoent|eacces|报错|失败|阻塞|卡在/i, "issues"],
-	[/(?:^|[\s`'"])[A-Za-z]:[\\/][^\s]+|(?:^|\s)\.{0,2}\/[\w.-]+\/[\w./-]+|\b[\w-]+\.(?:ts|tsx|js|mjs|cjs|json|md|py|cs|gdshader|cpp|h|sh)\b/, "files"],
-	[/prefer|must not|do not|always|never|要求|偏好|不要|必须/i, "prefs"],
-	[/decide|decided|chosen|instead of|rationale|决定|选择|理由/i, "decisions"],
-	// Findings last: a line that also names an error, a path, a preference or a
-	// decision stays there; findings catch only pure result/residue lines.
-	[/实测|真相|根因|出乎意料|非显然|turns? out|it turns out|it became clear|surprising\w*|unexpected\w*|root cause|measured/i, "findings"],
-];
-
-const JUNK_LINE =
-	/^(?:[-*+]\s*)?(?:\[?\s*(?:scope change|x|✓|✔|done|n\/a|none|todo|tbd|无|待填)\s*\]?|\(archived\).*|<!--.*-->)$/i;
-
-function routeSummaryHeader(header: string): Section | null {
-	for (const [re, section] of SUMMARY_HEADER_ROUTES) if (re.test(header)) return section;
-	return null;
-}
-
-function routeSummaryContent(line: string): Section | null {
-	for (const [re, section] of SUMMARY_CONTENT_ROUTES) if (re.test(line)) return section;
-	return null;
-}
-
 /**
- * Flatten a compaction summary into board entries. Pure: no fs, no writes.
- *
- * Bullets and prose lines both become candidates; headers only route them.
- * Sub-bullets are kept as their own entries — in a compaction summary a nested
- * line is usually its own fact (a path, an error, a number).
+ * Legacy adapter: the layered parser owns section semantics now, so explicit headings
+ * always win and content hints no longer re-route a line. Kept for old-board migration only;
+ * the event path imports through `summary-import.ts` with task state and preserved blocks.
  */
 export function parseSummarySections(summary: string): { section: Section; text: string }[] {
-	const out: { section: Section; text: string }[] = [];
-	let header: Section | null = null;
-	let headerText = "";
-	for (const raw of String(summary ?? "").split(/\r?\n/)) {
-		const line = raw.trim();
-		if (!line) continue;
-		if (line.startsWith("<!--")) continue;
-		const md = /^#{1,6}\s+(.+?)\s*$/.exec(line);
-		const br = /^\[(.+?)\]\s*:?\s*$/.exec(line);
-		if (md || br) {
-			headerText = (md ? md[1] : (br as RegExpExecArray)[1]).trim();
-			// The board's own summary must never be adopted back in.
-			if (headerText.startsWith(BOARD_SUMMARY_MARKER)) {
-				header = null;
-				continue;
-			}
-			header = routeSummaryHeader(headerText);
-			continue;
-		}
-		const body = line.replace(/^[-*+]\s+/, "").replace(/^\[[ xX]\]\s*/, "").trim();
-		if (!body || JUNK_LINE.test(line)) continue;
-		// Content sniffing wins over the header: a "Progress" bullet naming an
-		// error is an issue, not a change.
-		const section = routeSummaryContent(body) ?? header ?? "decisions";
-		out.push({ section, text: body });
-	}
-	return out;
+	return parseNativeSummary(summary)
+		.map((item) => ({ section: item.section as Section, text: item.text ?? "" }));
 }
 
 /**
@@ -213,7 +157,7 @@ function archivedLineKeys(boardDir: string, sessionId: string): Set<string> {
 		for (const line of text.split(/\r?\n/)) {
 			const h = /^##\s*From:\s*(.+?)\s*$/.exec(line);
 			if (h) {
-				section = routeSummaryHeader(h[1]) ?? "";
+				section = routeHeading(h[1]) ?? "";
 				continue;
 			}
 			const m = /^-\s*\[[^\]]*\]\s*(.+)$/.exec(line);
@@ -403,9 +347,12 @@ export function writeBoard(boardDir: string, sessionId: string, b: Board): void 
 	writeFileSync(p, renderBoard(b), "utf-8");
 }
 
-/** Sanitize a raw entry line: one line, trimmed, capped. */
+/** Normalize spacing; reject oversized input rather than deleting its final qualifier. */
 export function cleanEntryText(text: string, maxChars: number): string {
-	return text.replace(/\s+/g, " ").trim().slice(0, Math.max(10, maxChars));
+	const clean = text.replace(/\s+/g, " ").trim();
+	if (!Number.isFinite(maxChars) || maxChars < 1) throw new Error("Invalid entry character limit");
+	if (clean.length > maxChars) throw new Error(`Entry has ${clean.length} characters (limit ${maxChars}); write a complete shorter version. Nothing was truncated.`);
+	return clean;
 }
 
 function writeArchiveFile(
@@ -544,6 +491,7 @@ export function commitEntries(
 	cfg: { maxEntriesPerSection: number; maxEntryChars: number },
 	entries: CommitInput[],
 ): CommitResult {
+	const checked = entries.map((entry) => ({ ...entry, text: cleanEntryText(entry.text, cfg.maxEntryChars) }));
 	const board = readBoardFile(boardDir, sessionId);
 	const ts = nowLocal();
 	const archivedFiles: string[] = [];
@@ -554,8 +502,8 @@ export function commitEntries(
 	let committed = 0;
 	let deduped = 0;
 
-	for (const e of entries) {
-		const text = cleanEntryText(e.text, cfg.maxEntryChars);
+	for (const e of checked) {
+		const text = e.text;
 		if (!text) continue;
 
 		// Supersede FIRST, so the line being replaced is out of the board before the
@@ -737,24 +685,11 @@ export function renderCommitEcho(
 	return lines.join("\n").trimStart();
 }
 
-/**
- * Mark open issue entries as resolved when a referenced file was modified in
- * the current turn. Deterministic string matching; never removes history.
- */
-export function markResolved(board: Board, modifiedPaths: string[]): number {
-	if (modifiedPaths.length === 0) return 0;
-	const ts = nowLocal();
-	let n = 0;
-	for (const e of board.sections.issues) {
-		if (e.text.includes("[RESOLVED")) continue;
-		const hit = modifiedPaths.find((p) => p && e.text.includes(p));
-		if (hit) {
-			e.text = `${e.text} → [RESOLVED ${ts}]`;
-			n++;
-		}
-	}
-	if (n > 0) board.header.updated = ts;
-	return n;
+/** A changed file suggests revalidation, never proof that an issue is resolved. */
+export function revalidationCandidates(board: Board, modifiedPaths: string[]): string[] {
+	return board.sections.issues
+		.filter((e) => !e.text.includes("[RESOLVED") && modifiedPaths.some((p) => p && e.text.includes(p)))
+		.map((e) => `[RECHECK REQUIRED — not resolved] ${e.text}`);
 }
 
 /**

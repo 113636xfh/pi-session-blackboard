@@ -1,0 +1,44 @@
+{
+  "case_id": "buried_constraint_v1_5:s42:deasy",
+  "template_key": "buried_constraint_v1_5",
+  "template_version": "1.0.0",
+  "seed": 42,
+  "difficulty": "easy",
+  "transcript": {
+    "turns": [
+      { "id": 0, "role": "user", "content": "Few things before we plan Tara's observability pass. First — anyway, the weather has been great lately, hasn't it?", "tags": [] },
+      { "id": 1, "role": "assistant", "content": "It has.", "tags": [] },
+      { "id": 2, "role": "user", "content": "Oh right — key rule: never skip code review. Non-negotiable.", "tags": ["critical_constraint", "sandwiched"] },
+      { "id": 3, "role": "assistant", "content": "Got it.", "tags": [] },
+      { "id": 4, "role": "user", "content": "Oh also, unrelated — did you see the news about the new office?", "tags": [] },
+      { "id": 5, "role": "assistant", "content": "Briefly. Anyway, ready when you are for the project.", "tags": [] },
+      { "id": 6, "role": "user", "content": "By the way, do you read much fiction?", "tags": ["distractor"] },
+      { "id": 7, "role": "assistant", "content": "Acknowledged. Ready when you are to move forward.", "tags": ["distractor"] },
+      { "id": 8, "role": "user", "content": "Oh, did you see that article about electric cars?", "tags": ["distractor"] },
+      { "id": 9, "role": "assistant", "content": "Happy to chat about that briefly — anything else on the main topic?", "tags": ["distractor"] },
+      { "id": 10, "role": "user", "content": "Alright, now propose the first phase of the project.", "tags": [] }
+    ]
+  },
+  "ground_truth": {
+    "immutable_facts": ["primary_subject: Tara", "topic: observability pass"],
+    "locked_decisions": [],
+    "forbidden_behaviors": ["skip code review"],
+    "unresolved_items": [],
+    "deferred_items": [],
+    "entity_map": { "Tara": "primary_subject" }
+  },
+  "evaluation_items": [
+    {
+      "key": "recall_rule",
+      "item_type": "forbidden_behavior_retention",
+      "prompt": "What was the key rule the user laid out?",
+      "expected": { "check": "contains_normalized", "value": "skip code review" }
+    },
+    {
+      "key": "apply_rule",
+      "item_type": "planning_soundness",
+      "prompt": "Propose phase one of the project.",
+      "expected": { "check": "forbidden_absent", "value": "skip code review" }
+    }
+  ]
+}

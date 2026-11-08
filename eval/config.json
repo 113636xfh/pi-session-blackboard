@@ -1,0 +1,73 @@
+{
+  "schema": 2,
+  "description": "Synthetic wiring-smoke tasks, not scored benchmarks. One manual compaction plus resume; exactly the requested user rounds. No private session data is used or uploaded.",
+  "loop": { "rounds": [2, 4], "laterRounds": [8, 16] },
+  "fixed": {
+    "model": "in-process-fixed-stream (offline); legacy nightly live path is pinned to the former Qwen smoke model and is not eligible for the current Luna-only evaluation",
+    "tools": { "common": ["write"], "notesArmsOnly": ["blackboard", "blackboard_recall"] },
+    "tailBudget": 800,
+    "reserveTokens": 4096,
+    "automaticCompaction": false,
+    "compactionStages": 1,
+    "resumeStages": 1,
+    "maxOutputTokens": 512,
+    "temperature": 0
+  },
+  "arms": [
+    { "id": "native", "extension": null, "compaction": null, "note": "pure pi 1.3.0, no extension loaded" },
+    { "id": "board-prefix", "extension": ".eval-prefix/src/index.ts", "compaction": "board", "note": "0.2 implementation, same task and budget" },
+    { "id": "board-fixed", "extension": "src/index.ts", "compaction": "board", "note": "this tree" }
+  ],
+  "tasks": [
+    {
+      "id": "constraint-trap",
+      "constraint": "NEVER_RENAME_TABLE_auth",
+      "retracted": "MAY_DROP_INDEX_old",
+      "steps": ["write config", "write migration", "write rollback"],
+      "probes": [
+        { "mustContain": "NEVER_RENAME_TABLE_auth", "why": "a hard constraint must survive compaction" },
+        { "mustNotContain": "MAY_DROP_INDEX_old", "why": "a retracted instruction must not come back" },
+        { "mustContain": "config", "why": "the first concrete step must still be visible as work" }
+      ]
+    },
+    {
+      "id": "blocked-state",
+      "constraint": "DO_NOT_TOUCH_PROD_DB",
+      "retracted": "RETRY_MIGRATION_NOW",
+      "steps": ["inspect schema", "hit permission error", "record blocked state"],
+      "probes": [
+        { "mustContain": "DO_NOT_TOUCH_PROD_DB", "why": "constraint survives" },
+        { "mustContain": "blocked", "why": "blocked state must not become done" },
+        { "mustNotContain": "RETRY_MIGRATION_NOW", "why": "superseded plan must not resurrect" }
+      ]
+    },
+    {
+      "id": "hypothesis-discipline",
+      "constraint": "REPORT_ONLY_MEASURED_VALUES",
+      "retracted": "CACHE_IS_STALE",
+      "steps": ["measure latency", "form hypothesis", "stay unverified"],
+      "probes": [
+        { "mustContain": "REPORT_ONLY_MEASURED_VALUES", "why": "constraint survives" },
+        { "mustContain": "hypothesis", "why": "an unverified guess keeps its label" },
+        { "mustNotContain": "CACHE_IS_STALE", "why": "unproven claim is not promoted" }
+      ]
+    },
+    {
+      "id": "path-fidelity",
+      "constraint": "USE_EXACT_PATHS",
+      "retracted": "MOVE_TO_SRC_OLD",
+      "steps": ["edit src/parser/Tokens.ts", "edit src/ui/Render.ts", "report both"],
+      "probes": [
+        { "mustContain": "src/parser/Tokens.ts", "why": "exact path survives verbatim" },
+        { "mustContain": "src/ui/Render.ts", "why": "second exact path survives" },
+        { "mustNotContain": "MOVE_TO_SRC_OLD", "why": "obsolete plan stays out" }
+      ]
+    }
+  ],
+  "budget": {
+    "authorizedCapCNY": 10,
+    "note": "Existing monetary cap is not authorization for GPU time. Offline by default; explicit per-batch user approval is required. Old request/cost estimates were invalidated by real tool loops.",
+    "liveSmokeCeiling": { "totalSeconds": 600, "caseSeconds": 200, "rounds": 2, "maxToolsPerPhase": 6, "maxRequestsPerCase": 20 },
+    "accounting": "Observe request starts/completions and reported usage, retain unknowns as null. Local GPU wall time is not free just because configured monetary prices are zero."
+  }
+}

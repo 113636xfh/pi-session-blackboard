@@ -78,14 +78,24 @@ export function normalizeBranch(entries: BranchEntry[]): NormalizedBlocks {
 			const callId = typeof m.toolCallId === "string" ? m.toolCallId : "";
 			const call = calls.get(callId);
 			const name = typeof m.toolName === "string" ? m.toolName : call?.name ?? "unknown";
+			const status = m.details?.cancelled === true ? "cancelled"
+				: m.details?.status === "unfinished" ? "unfinished"
+				: m.isError === true || (typeof m.details?.exitCode === "number" && m.details.exitCode !== 0) ? "error"
+				: m.isError === false ? "ok" : "unknown";
 			out.tools.push({
 				entryId: id,
 				callId,
 				name,
 				args: call?.args ?? {},
 				output: textOf(m.content).slice(0, 4000),
-				isError: m.isError === true,
+				isError: status === "error" || status === "cancelled",
+				status,
 			});
+			for (const nested of m.nestedCalls?.calls ?? []) {
+				const status = m.nestedCalls?.complete === true ? nested.status : "unknown";
+				out.tools.push({ entryId: id, callId: nested.id, name: nested.name,
+					args: nested.arguments ?? {}, output: nested.error ?? "", isError: status === "error", status });
+			}
 		}
 		// custom_message / compaction / session / model_change etc. are ignored:
 		// we never mine our own injected checkpoint messages.
@@ -98,25 +108,22 @@ export function normalizeBranch(entries: BranchEntry[]): NormalizedBlocks {
 // ---------------------------------------------------------------------------
 
 const SCOPE_CHANGE_RE =
-	/\b(instead|actually|change of plan|forget that|new task|switch to|now I want|pivot|let'?s do|stop .* and)\b/i;
+	/\b(instead|actually|change of plan|forget that|new task|switch to|now I want|pivot|let'?s do|stop .* and)\b|改为|改成|计划变更|换个任务|先别实现/i;
 const NOISE_SHORT_RE = /^(ok|yes|no|sure|yeah|yep|go|hi|hey|thx|thanks|y|n|k)\s*[.!?]*$/i;
 const NON_GOAL_RE =
 	/^\s*[\[│├└─╭╰]|```|^\s*(function |const |let |var |import |export |class )|^(https?:|file:|\/[A-Za-z])|\n/;
-const MAX_GOAL_CHARS = 200;
 const LEADING_CHARS = 200;
 
-const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 const stripBullet = (line: string) => line.replace(/^\s*(?:[-*+]|\d+\.)\s+/, "").trim();
 
 function goalLines(text: string): string[] {
 	const out: string[] = [];
 	for (const raw of text.split("\n")) {
 		const t = stripBullet(raw.trim());
-		if (t.length <= 5 || t.length > MAX_GOAL_CHARS) continue;
+		if (t.length < 3) continue;
 		if (NOISE_SHORT_RE.test(t)) continue;
 		if (NON_GOAL_RE.test(t)) continue;
-		out.push(clip(t, MAX_GOAL_CHARS));
-		if (out.length >= 6) break;
+		out.push(t);
 	}
 	return out;
 }
@@ -148,8 +155,7 @@ export function extractGoal(users: UserBlock[], board: Board, state: SbbState): 
 		if (SCOPE_CHANGE_RE.test(leading)) {
 			const lines = goalLines(b.text);
 			if (lines.length > 0) {
-				out.push("[Scope change]", ...lines.slice(0, 3));
-				break;
+				out.push("[Scope change]", ...lines);
 			}
 		}
 	}
@@ -157,6 +163,8 @@ export function extractGoal(users: UserBlock[], board: Board, state: SbbState): 
 }
 
 const PREF_PATTERNS = [
+	/(?:禁止|不要|不得|不能|务必|必须|始终|仅限|只允许|优先使用|请使用|请避免|偏好)/,
+	/用中文(?:回答|回复)|(?:费用|预算).*(?:不超过|上限|最多)/,
 	/\bprefer(?:s|red|ring)?\s+\w/i,
 	/\bdon'?t want\b/i,
 	/\balways (?:use|do|run|prefer|keep|make|format|write|add|set|put|prefix|start|include|append)\b/i,
@@ -171,17 +179,16 @@ export function extractPrefs(users: UserBlock[], existing: string[]): string[] {
 	for (const b of users) {
 		for (const raw of b.text.split("\n")) {
 			const t = raw.trim();
-			if (t.length < 5 || t.length > 200) continue;
-			if (t.endsWith("?") || t.includes("?...")) continue;
+			if (t.length < 3) continue;
+			if (t.endsWith("?") || t.endsWith("？") || t.includes("?...")) continue;
 			if (!PREF_PATTERNS.some((p) => p.test(t))) continue;
-			const c = clip(t, 200);
+			const c = t;
 			if (seen.has(c.toLowerCase())) continue;
 			seen.add(c.toLowerCase());
 			out.push(c);
-			break; // one per user block
 		}
 	}
-	return out.slice(0, 5);
+	return out;
 }
 
 /**
@@ -217,11 +224,16 @@ function exportedSymbols(src: string): string[] {
 	return out;
 }
 
+export function toolOutcome(t: ToolBlock): NonNullable<ToolBlock["status"]> {
+	if (t.status && t.status !== "ok") return t.status;
+	return t.isError ? "error" : t.status ?? (t.isError === false ? "ok" : "unknown");
+}
+
 export function extractFiles(tools: ToolBlock[]): { lines: string[]; paths: Set<string> } {
 	const lines: string[] = [];
 	const paths = new Set<string>();
 	for (const t of tools) {
-		if (!FILE_TOOLS.has(t.name)) continue;
+		if (!FILE_TOOLS.has(t.name) || toolOutcome(t) !== "ok") continue;
 		const path =
 			typeof t.args.file_path === "string" ? t.args.file_path : typeof t.args.path === "string" ? (t.args.path as string) : "";
 		if (!path) continue;
@@ -246,15 +258,14 @@ export function extractFiles(tools: ToolBlock[]): { lines: string[]; paths: Set<
 export function extractCommits(tools: ToolBlock[]): string[] {
 	const out: string[] = [];
 	for (const t of tools) {
-		if (t.name !== "bash" || t.isError) continue;
+		if (t.name !== "bash" || toolOutcome(t) !== "ok") continue;
 		const cmd = typeof t.args.command === "string" ? (t.args.command as string) : "";
 		if (!/\bgit\s+commit\b/.test(cmd)) continue;
 		const m = t.output.match(/\[[^\]\n]*\]\s+([0-9a-f]{7,40})\b/) ?? t.output.match(/\b([0-9a-f]{40})\b/);
 		if (!m) continue;
 		const hash = m[1].slice(0, 10);
-		const subject = (t.output.split(m[1]).slice(1).join(" ").trim().split("\n")[0] ?? "").slice(0, 80);
+		const subject = t.output.split(m[1]).slice(1).join(" ").trim().split("\n")[0] ?? "";
 		out.push(`COMMIT ${hash} ${subject}`.trim());
-		if (out.length >= 4) break;
 	}
 	return out;
 }
@@ -287,8 +298,13 @@ function pickErrorLine(out: string): string {
 export function extractIssues(tools: ToolBlock[]): string[] {
 	const out: string[] = [];
 	for (const t of tools) {
-		if (t.name !== "bash" && t.name !== "run") continue;
-		let failed = t.isError;
+		const outcome = toolOutcome(t);
+		if (outcome === "cancelled" || outcome === "unfinished" || outcome === "unknown") {
+			const target = t.args.path ?? t.args.file_path ?? t.args.command ?? t.callId;
+			out.push(`[${outcome.toUpperCase()}] ${t.name} ${String(target)}`);
+			continue;
+		}
+		let failed = outcome === "error";
 		if (!failed) {
 			const em = t.output.match(/exit(?:ed)? with (?:code|status) (\d+)/i);
 			failed = !!em && em[1] !== "0";
@@ -297,7 +313,6 @@ export function extractIssues(tools: ToolBlock[]): string[] {
 		const line = pickErrorLine(t.output);
 		const cmd = (typeof t.args.command === "string" ? (t.args.command as string) : "").replace(/\s+/g, " ").slice(0, 80);
 		if (line) out.push(`[ERROR] ${cmd}: ${line}`.trim());
-		if (out.length >= 4) break;
 	}
 	return out;
 }
@@ -322,7 +337,6 @@ export function extractExperiments(tools: ToolBlock[]): string[] {
 		if (seen.has(c)) continue;
 		seen.add(c);
 		out.push(`RAN ${c}${t.isError ? " (failed)" : ""}`);
-		if (out.length >= 4) break;
 	}
 	return out;
 }
@@ -342,14 +356,14 @@ export function extractDecisions(assistants: AssistantBlock[]): string[] {
 			const line = stripBullet(raw);
 			if (line.length < 20) continue;
 			if (!DECISION_RE.test(line)) continue;
-			const c = clip(line, 260);
+			const c = line;
 			const key = c.toLowerCase();
 			if (seen.has(key)) continue;
 			seen.add(key);
 			out.push(c);
 		}
 	}
-	return out.slice(0, 3);
+	return out;
 }
 
 /**
@@ -368,14 +382,14 @@ export function extractFindings(assistants: AssistantBlock[]): string[] {
 			const line = stripBullet(raw);
 			if (line.length < 15) continue;
 			if (!FINDING_RE.test(line)) continue;
-			const c = clip(line, 260);
+			const c = line;
 			const key = c.toLowerCase();
 			if (seen.has(key)) continue;
 			seen.add(key);
 			out.push(c);
 		}
 	}
-	return out.slice(0, 4);
+	return out;
 }
 
 const NEXT_RE = /\b(next (?:step|I|we|action|move)|TODO:|after (?:this|that),? (?:we|I)|remaining (?:work|steps))\b/i;
@@ -387,18 +401,15 @@ export function extractNext(assistants: AssistantBlock[], users: UserBlock[]): s
 		const line = stripBullet(raw);
 		if (line.length < 15) return;
 		if (!NEXT_RE.test(line)) return;
-		const c = clip(line, 200);
+		const c = line;
 		const key = c.toLowerCase();
 		if (seen.has(key)) return;
 		seen.add(key);
 		out.push(c);
 	};
 	for (const b of assistants) for (const raw of b.text.split("\n")) push(raw);
-	if (out.length < 3) for (const b of users) for (const raw of b.text.split("\n")) {
-		if (out.length >= 3) break;
-		push(raw);
-	}
-	return out.slice(0, 3);
+	for (const b of users) for (const raw of b.text.split("\n")) push(raw);
+	return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -407,17 +418,15 @@ export function extractNext(assistants: AssistantBlock[], users: UserBlock[]): s
 
 export type ExtractResult = {
 	draft: DraftSections;
-	resolvedPaths: string[];
+	modifiedPaths: string[];
 	/** experiment-like commands run in this window (reminder fodder). */
 	experiments: string[];
 };
 
-const PER_SECTION_CAP = 8;
-
 /**
  * Run all extractors over the NEW blocks of this turn. Pure function, no I/O,
  * no LLM. Returns draft lines (pre-commit) plus paths of files modified this
- * turn (used for [RESOLVED] marking of open issues).
+ * turn (only a prompt to revalidate, never proof of resolution).
  */
 export function extractAll(
 	blocks: NormalizedBlocks,
@@ -430,12 +439,12 @@ export function extractAll(
 		if (lines.length === 0) return;
 		const fresh: string[] = [];
 		for (const l of lines) {
-			const k = l.toLowerCase();
+			const k = s === "files" ? l : l.toLowerCase();
 			if (globalSeen.has(k)) continue; // a line is filed under ONE section only
 			globalSeen.add(k);
 			fresh.push(l);
 		}
-		if (fresh.length > 0) draft[s] = [...(draft[s] ?? []), ...fresh].slice(0, PER_SECTION_CAP);
+		if (fresh.length > 0) draft[s] = [...(draft[s] ?? []), ...fresh];
 	};
 
 	const goalLines = extractGoal(blocks.users, board, state);
@@ -457,5 +466,5 @@ export function extractAll(
 	put("findings", extractFindings(blocks.assistants));
 	put("next", extractNext(blocks.assistants, blocks.users));
 
-	return { draft, resolvedPaths: [...files.paths], experiments: extractExperiments(blocks.tools) };
+	return { draft, modifiedPaths: [...files.paths], experiments: extractExperiments(blocks.tools) };
 }
