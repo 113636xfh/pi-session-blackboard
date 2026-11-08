@@ -12,6 +12,13 @@ export type SbbConfig = {
 	 */
 	checkpointTurns: number;
 	/**
+	 * Inject the "[context pressure] compaction is X away" countdown into the
+	 * checkpoint. Off by default: the number is not actionable, and it competes
+	 * with the review request itself for the agent's attention. Set true to get
+	 * the countdown and the NEAR COMPACTION instruction back.
+	 */
+	contextPressure: boolean;
+	/**
 	 * How the checkpoint reaches the agent:
 	 *  - "next-turn": injected with the next user message (zero extra LLM calls)
 	 *  - "immediate": a steer message triggers a review turn now (small extra LLM call)
@@ -110,6 +117,7 @@ const SETTINGS_KEY = "session-blackboard";
 export const DEFAULTS: SbbConfig = {
 	enabled: true,
 	checkpointTurns: 1,
+	contextPressure: false,
 	delivery: "next-turn",
 	maxEntriesPerSection: 40,
 	boardDir: join(getAgentDir(), "blackboard"),
@@ -278,6 +286,7 @@ export function loadConfig(cwd: string): SbbConfig {
 	const cfg: SbbConfig = { ...DEFAULTS };
 	cfg.enabled = pickBool(all, "enabled", cfg.enabled);
 	cfg.checkpointTurns = Math.max(1, Math.floor(pickNum(all, "checkpointTurns", cfg.checkpointTurns)));
+	cfg.contextPressure = pickBool(all, "contextPressure", cfg.contextPressure);
 	cfg.delivery = pickStr(all, "delivery", cfg.delivery) === "immediate" ? "immediate" : "next-turn";
 	cfg.maxEntriesPerSection = Math.max(5, Math.floor(pickNum(all, "maxEntriesPerSection", cfg.maxEntriesPerSection)));
 	cfg.maxEntryChars = Math.max(100, Math.floor(pickNum(all, "maxEntryChars", cfg.maxEntryChars)));

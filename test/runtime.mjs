@@ -352,8 +352,11 @@ test('pressure numbers are transient: never stored, never summarised, never rein
   const blind = (await h.hooks.before_agent_start({}, h.ctx))?.message?.content ?? '';
   assert(!/[0-9]/.test(blind.split('\n').filter(line => line.includes('context pressure')).join('')));
   h.ctx.getContextUsage = () => ({ tokens: 60000, contextWindow: 64000 });
+  const silent = (await h.hooks.before_agent_start({}, h.ctx))?.message?.content ?? '';
+  assert(!silent.includes('context pressure'), 'the countdown is off by default');
+  writeFileSync(join(h.cwd, '.pi/settings.json'), JSON.stringify({ 'session-blackboard': { boardDir: join(h.cwd, 'boards'), compaction: 'board', seedFromPriorSummary: false, contextPressure: true } }));
   const near = (await h.hooks.before_agent_start({}, h.ctx)).message.content;
-  assert(near.includes('context pressure') && /[0-9]/.test(near), 'fresh measurement is shown');
+  assert(near.includes('context pressure') && /[0-9]/.test(near), 'fresh measurement is shown when contextPressure is on');
   assert(!JSON.stringify(h.projection()).includes('context pressure'), 'numbers never enter the journal');
   const summary = (await h.hooks.session_before_compact({ reason: 'threshold', preparation: { firstKeptEntryId: null, tokensBefore: 60000 } }, h.ctx)).compaction.summary;
   assert(!summary.includes('context pressure') && !summary.includes('NEAR COMPACTION'));

@@ -175,6 +175,7 @@ pi。
 | `enabled` | `true` | 设为 `false` 同时把两个工具从模型工具集中移除并停止注入。运行时等价物是 `/bb off`，作用于分支且恢复会话后仍生效 |
 | `compaction` | `"off"` | `off` / `board` / `digest`（仅迁移） |
 | `checkpointTurns` | `1` | 提醒间隔（回合） |
+| `contextPressure` | `false` | 在提醒里注入「距压缩还有多少上下文」的倒计时；默认关，因为这个数字不可执行 |
 | `summaryMaxChars` | `6000` | 渲染摘要的精确字符上限 |
 | `compactAssist` | `false` | 显式开启「原生摘要 + 笔记」（手动自定义关注点） |
 | `compactAssistMaxChars` | `4000` | 追加笔记块的上限 |

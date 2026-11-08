@@ -208,6 +208,7 @@ session file and are ignored by 0.2. Nothing here upgrades your global pi.
 | `enabled` | `true` | `false` also removes both tools from the model's tool set and stops injection. The runtime equivalent is `/bb off`, which is branch-local and survives resume |
 | `compaction` | `"off"` | `off` / `board` / `digest` (migration only) |
 | `checkpointTurns` | `1` | reminder cadence in turns |
+| `contextPressure` | `false` | inject the "[context pressure] compaction is X away" countdown into the reminder; off by default because the number is not actionable |
 | `summaryMaxChars` | `6000` | exact character cap for the rendered summary |
 | `compactAssist` | `false` | opt-in native summary + notes (manual custom instructions) |
 | `compactAssistMaxChars` | `4000` | cap for the appended notes block |

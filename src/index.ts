@@ -310,7 +310,7 @@ export default function sessionBlackboard(pi: ExtensionAPI) {
     const due = near || (s.projection.draft && s.projection.turns % s.cfg.checkpointTurns === 0);
     // The countdown is a transient block computed from this turn's measurement only. It is never
     // stored as a note, never copied into a summary, and disappears with its compaction generation.
-    const lines = typeof p?.remaining === 'number' && p.remaining !== null && ctx.getContextUsage?.()
+    const lines = s.cfg.contextPressure && typeof p?.remaining === 'number' && p.remaining !== null && ctx.getContextUsage?.()
       ? [describePressure(p)!] : [];
     if (!due && !lines.length) return;
     if (due) lines.push(

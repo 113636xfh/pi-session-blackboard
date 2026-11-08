@@ -3,6 +3,11 @@
 All notable changes to this project are documented here.
 
 ## Unreleased
+- The context-pressure countdown is now opt-in: `contextPressure` defaults to
+  **false**, so the checkpoint no longer injects "[context pressure] compaction is
+  X away" or the NEAR COMPACTION instruction. The number is not actionable and it
+  competed with the review request itself. Set `contextPressure: true` to get it
+  back; the checkpoint and its coverage rules are unchanged.
 - Add the manual knob: `/bb off`, `/bb on`, `/bb status`. The state is one journal
   event on the current branch, not process memory, so resuming or continuing the
   session replays it and stays disabled; `session_start` reports the state again.
